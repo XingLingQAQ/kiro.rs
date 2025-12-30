@@ -759,6 +759,18 @@ impl StreamContext {
 
         self.state_manager.set_has_tool_use(true);
 
+        // thinking 模式下，process_content_with_thinking 可能会为了探测 `<thinking>` 而暂存一小段尾部文本。
+        // 如果此时直接开始 tool_use，状态机会自动关闭 text block，导致这段“待输出文本”看起来被 tool_use 吞掉。
+        // 约束：只在尚未进入 thinking block、且 thinking 尚未被提取时，将缓冲区当作普通文本 flush。
+        if self.thinking_enabled
+            && !self.in_thinking_block
+            && !self.thinking_extracted
+            && !self.thinking_buffer.is_empty()
+        {
+            let buffered = std::mem::take(&mut self.thinking_buffer);
+            events.extend(self.create_text_delta_events(&buffered));
+        }
+
         // 获取或分配块索引
         let block_index = if let Some(&idx) = self.tool_block_indices.get(&tool_use.tool_use_id) {
             idx
@@ -968,6 +980,76 @@ mod tests {
                     && e.data["delta"]["text"] == "hello"
             }),
             "should emit text_delta after restarting text block"
+        );
+    }
+
+    #[test]
+    fn test_tool_use_flushes_pending_thinking_buffer_text_before_tool_block() {
+        // thinking 模式下，短文本可能被暂存在 thinking_buffer 以等待 `<thinking>` 的跨 chunk 匹配。
+        // 当紧接着出现 tool_use 时，应先 flush 这段文本，再开始 tool_use block。
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, true);
+        let _initial_events = ctx.generate_initial_events();
+
+        // 两段短文本（各 2 个中文字符），总长度仍可能不足以满足 safe_len>0 的输出条件，
+        // 因而会留在 thinking_buffer 中等待后续 chunk。
+        let ev1 = ctx.process_assistant_response("有修");
+        assert!(
+            ev1.iter().all(|e| e.event != "content_block_delta"),
+            "short prefix should be buffered under thinking mode"
+        );
+        let ev2 = ctx.process_assistant_response("改：");
+        assert!(
+            ev2.iter().all(|e| e.event != "content_block_delta"),
+            "short prefix should still be buffered under thinking mode"
+        );
+
+        let events = ctx.process_tool_use(&crate::kiro::model::events::ToolUseEvent {
+            name: "Write".to_string(),
+            tool_use_id: "tool_1".to_string(),
+            input: "{}".to_string(),
+            stop: false,
+        });
+
+        let text_start_index = events.iter().find_map(|e| {
+            if e.event == "content_block_start" && e.data["content_block"]["type"] == "text" {
+                e.data["index"].as_i64()
+            } else {
+                None
+            }
+        });
+        let pos_text_delta = events.iter().position(|e| {
+            e.event == "content_block_delta" && e.data["delta"]["type"] == "text_delta"
+        });
+        let pos_text_stop = text_start_index.and_then(|idx| {
+            events.iter().position(|e| {
+                e.event == "content_block_stop" && e.data["index"].as_i64() == Some(idx)
+            })
+        });
+        let pos_tool_start = events.iter().position(|e| {
+            e.event == "content_block_start" && e.data["content_block"]["type"] == "tool_use"
+        });
+
+        assert!(text_start_index.is_some(), "should start a text block to flush buffered text");
+        assert!(pos_text_delta.is_some(), "should flush buffered text as text_delta");
+        assert!(pos_text_stop.is_some(), "should stop text block before tool_use block starts");
+        assert!(pos_tool_start.is_some(), "should start tool_use block");
+
+        let pos_text_delta = pos_text_delta.unwrap();
+        let pos_text_stop = pos_text_stop.unwrap();
+        let pos_tool_start = pos_tool_start.unwrap();
+
+        assert!(
+            pos_text_delta < pos_text_stop && pos_text_stop < pos_tool_start,
+            "ordering should be: text_delta -> text_stop -> tool_use_start"
+        );
+
+        assert!(
+            events.iter().any(|e| {
+                e.event == "content_block_delta"
+                    && e.data["delta"]["type"] == "text_delta"
+                    && e.data["delta"]["text"] == "有修改："
+            }),
+            "flushed text should equal the buffered prefix"
         );
     }
 
