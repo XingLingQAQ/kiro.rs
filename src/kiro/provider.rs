@@ -24,7 +24,7 @@ impl KiroProvider {
         Self {
             token_manager,
             client: Client::builder()
-                .timeout(std::time::Duration::from_secs(300)) // 5 分钟超时
+                .timeout(std::time::Duration::from_secs(720)) // 12 分钟超时
                 .build()
                 .expect("Failed to create HTTP client"),
         }
