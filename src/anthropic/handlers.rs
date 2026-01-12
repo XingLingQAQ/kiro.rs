@@ -17,7 +17,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt, stream};
 use serde_json::json;
 use std::time::Duration;
-use tokio::time::interval;
+use tokio::time::{Instant, interval_at};
 use uuid::Uuid;
 
 use super::converter::{ConversionError, convert_request};
@@ -156,7 +156,10 @@ pub async fn post_messages(
         }
     };
 
+    #[cfg(feature = "sensitive-logs")]
     tracing::debug!("Kiro request body: {}", request_body);
+    #[cfg(not(feature = "sensitive-logs"))]
+    tracing::debug!(kiro_request_body_len = request_body.len(), "已构建 Kiro 请求体");
 
     // 估算输入 tokens
     let input_tokens = token::count_all_tokens(
@@ -264,9 +267,11 @@ fn create_sse_stream(
 
     // 然后处理 Kiro 响应流，同时每25秒发送 ping 保活
     let body_stream = response.bytes_stream();
+    let ping_period = Duration::from_secs(PING_INTERVAL_SECS);
+    let ping_interval = interval_at(Instant::now() + ping_period, ping_period);
 
     let processing_stream = stream::unfold(
-        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS))),
+        (body_stream, ctx, EventStreamDecoder::new(), false, ping_interval),
         |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
             if finished {
                 return None;

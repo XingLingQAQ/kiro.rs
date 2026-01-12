@@ -56,7 +56,17 @@ async fn main() {
 
     // 获取第一个凭据用于日志显示
     let first_credentials = credentials_list.first().cloned().unwrap_or_default();
+    #[cfg(feature = "sensitive-logs")]
     tracing::debug!("主凭证: {:?}", first_credentials);
+    #[cfg(not(feature = "sensitive-logs"))]
+    tracing::debug!(
+        id = ?first_credentials.id,
+        priority = first_credentials.priority,
+        has_profile_arn = first_credentials.profile_arn.is_some(),
+        has_expires_at = first_credentials.expires_at.is_some(),
+        auth_method = ?first_credentials.auth_method.as_deref(),
+        "主凭证摘要"
+    );
 
     // 获取 API Key
     let api_key = config.api_key.clone().unwrap_or_else(|| {
@@ -156,6 +166,12 @@ async fn main() {
         tracing::info!("  GET  /admin");
     }
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| {
+        tracing::error!("绑定监听地址失败 ({}): {}", addr, e);
+        std::process::exit(1);
+    });
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!("HTTP 服务异常退出: {}", e);
+        std::process::exit(1);
+    }
 }

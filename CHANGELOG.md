@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+- 新增 `sensitive-logs` feature flag，显式启用才允许打印潜在敏感信息（仅用于排障）
+  - 默认关闭：Kiro 请求体只输出长度，凭证只输出摘要信息
+  - 启用方式：`cargo build --features sensitive-logs`
+
+### Fixed
+- 修复 SSE 流 ping 保活首次立即触发的问题
+  - 使用 `interval_at(Instant::now() + ping_period, ping_period)` 延迟首次触发
+  - 避免连接建立后立即发送无意义的 ping 事件
+
+### Changed
+- 改进服务启动错误处理
+  - 绑定监听地址失败时输出错误日志并退出（exit code 1）
+  - HTTP 服务异常退出时输出错误日志并退出（exit code 1）
+
 ### Fixed
 - 修复合并上游后 `CredentialEntry` 结构体字段缺失导致的编译错误
   - 添加 `disable_reason: Option<DisableReason>` 字段（公共 API 展示用）
