@@ -100,6 +100,13 @@ async fn main() {
         std::process::exit(1);
     });
     let token_manager = Arc::new(token_manager);
+
+    // 初始化余额缓存并按余额选择初始凭据
+    let init_count = token_manager.initialize_balances().await;
+    if init_count == 0 && token_manager.total_count() > 0 {
+        tracing::warn!("所有凭据余额初始化失败，将按优先级选择凭据");
+    }
+
     let kiro_provider = KiroProvider::with_proxy(token_manager.clone(), proxy_config.clone());
 
     // 初始化 count_tokens 配置
@@ -166,10 +173,12 @@ async fn main() {
         tracing::info!("  GET  /admin");
     }
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| {
-        tracing::error!("绑定监听地址失败 ({}): {}", addr, e);
-        std::process::exit(1);
-    });
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("绑定监听地址失败 ({}): {}", addr, e);
+            std::process::exit(1);
+        });
     if let Err(e) = axum::serve(listener, app).await {
         tracing::error!("HTTP 服务异常退出: {}", e);
         std::process::exit(1);

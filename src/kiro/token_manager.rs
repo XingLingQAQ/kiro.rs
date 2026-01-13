@@ -383,7 +383,11 @@ pub(crate) async fn get_usage_limits(
     let body_text = response.text().await?;
 
     let data: UsageLimitsResponse = serde_json::from_str(&body_text).map_err(|e| {
-        tracing::error!("getUsageLimits JSON 解析失败: {}，原始响应: {}", e, body_text);
+        tracing::error!(
+            "getUsageLimits JSON 解析失败: {}，原始响应: {}",
+            e,
+            body_text
+        );
         anyhow::anyhow!("JSON 解析失败: {}", e)
     })?;
     Ok(data)
@@ -468,8 +472,6 @@ pub struct CredentialEntrySnapshot {
 pub struct ManagerSnapshot {
     /// 凭据条目列表
     pub entries: Vec<CredentialEntrySnapshot>,
-    /// 当前活跃凭据 ID
-    pub current_id: u64,
     /// 总凭据数量
     pub total: usize,
     /// 可用凭据数量
@@ -517,15 +519,13 @@ const LOW_BALANCE_THRESHOLD: f64 = 1.0;
 
 /// 多凭据 Token 管理器
 ///
-/// 支持多个凭据的管理，实现固定优先级 + 故障转移策略
+/// 支持多个凭据的管理，实现负载均衡 + 故障转移策略
 /// 故障统计基于 API 调用结果，而非 Token 刷新结果
 pub struct MultiTokenManager {
     config: Config,
     proxy: Option<ProxyConfig>,
     /// 凭据条目列表
     entries: Mutex<Vec<CredentialEntry>>,
-    /// 当前活动凭据 ID
-    current_id: Mutex<u64>,
     /// Token 刷新锁，确保同一时间只有一个刷新操作
     refresh_lock: TokioMutex<()>,
     /// 凭据文件路径（用于回写）
@@ -538,7 +538,7 @@ pub struct MultiTokenManager {
     global_recovery_time: Mutex<Option<DateTime<Utc>>>,
     /// 用户亲和性管理器
     affinity: UserAffinityManager,
-    /// 余额缓存（用于故障转移时选择余额最高的凭据）
+    /// 余额缓存（用于负载均衡和故障转移时选择最优凭据）
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
 }
 
@@ -554,7 +554,6 @@ const GLOBAL_DISABLE_RECOVERY_MINUTES: i64 = 10;
 /// API 调用上下文
 ///
 /// 绑定特定凭据的调用上下文，确保 token、credentials 和 id 的一致性
-/// 用于解决并发调用时 current_id 竞态问题
 #[derive(Clone)]
 pub struct CallContext {
     /// 凭据 ID（用于 report_success/report_failure）
@@ -619,13 +618,6 @@ impl MultiTokenManager {
             anyhow::bail!("检测到重复的凭据 ID: {:?}", duplicate_ids);
         }
 
-        // 选择初始凭据：优先级最高（priority 最小）的凭据，无凭据时为 0
-        let initial_id = entries
-            .iter()
-            .min_by_key(|e| e.credentials.priority)
-            .map(|e| e.id)
-            .unwrap_or(0);
-
         // 初始化余额缓存（为每个凭据创建初始条目，支持负载均衡）
         let now = std::time::Instant::now();
         let initial_cache: HashMap<u64, CachedBalance> = entries
@@ -648,7 +640,6 @@ impl MultiTokenManager {
             config,
             proxy,
             entries: Mutex::new(entries),
-            current_id: Mutex::new(initial_id),
             refresh_lock: TokioMutex::new(()),
             credentials_path,
             is_multiple_format,
@@ -675,17 +666,6 @@ impl MultiTokenManager {
         &self.config
     }
 
-    /// 获取当前活动凭据的克隆
-    pub fn credentials(&self) -> KiroCredentials {
-        let entries = self.entries.lock();
-        let current_id = *self.current_id.lock();
-        entries
-            .iter()
-            .find(|e| e.id == current_id)
-            .map(|e| e.credentials.clone())
-            .unwrap_or_default()
-    }
-
     /// 获取凭据总数
     pub fn total_count(&self) -> usize {
         self.entries.lock().len()
@@ -701,6 +681,7 @@ impl MultiTokenManager {
     /// 返回绑定了 id、credentials 和 token 的调用上下文
     /// 确保整个 API 调用过程中使用一致的凭据信息
     ///
+    /// 选择策略：按优先级选择可用凭据
     /// 如果 Token 过期或即将过期，会自动刷新
     /// Token 刷新失败时会尝试下一个可用凭据（不计入失败次数）
     pub async fn acquire_context(&self) -> anyhow::Result<CallContext> {
@@ -708,10 +689,10 @@ impl MultiTokenManager {
         self.check_and_recover();
 
         let total = self.total_count();
-        let mut tried_count = 0;
+        let mut tried_ids: Vec<u64> = Vec::new();
 
         loop {
-            if tried_count >= total {
+            if tried_ids.len() >= total {
                 anyhow::bail!(
                     "所有凭据均无法获取有效 Token（可用: {}/{}）",
                     self.available_count(),
@@ -721,58 +702,41 @@ impl MultiTokenManager {
 
             let (id, credentials) = {
                 let mut entries = self.entries.lock();
-                let current_id = *self.current_id.lock();
 
-                // 找到当前凭据
-                if let Some(entry) = entries.iter().find(|e| e.id == current_id && !e.disabled) {
+                // 选择优先级最高的可用凭据（排除已尝试过的）
+                let mut best = entries
+                    .iter()
+                    .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
+                    .min_by_key(|e| e.credentials.priority);
+
+                // 没有可用凭据：如果是"自动禁用导致全灭"，做一次类似重启的自愈
+                if best.is_none()
+                    && entries.iter().any(|e| {
+                        e.disabled && e.auto_heal_reason == Some(AutoHealReason::TooManyFailures)
+                    })
+                {
+                    tracing::warn!(
+                        "所有凭据均已被自动禁用，执行自愈：重置失败计数并重新启用（等价于重启）"
+                    );
+                    for e in entries.iter_mut() {
+                        if e.auto_heal_reason == Some(AutoHealReason::TooManyFailures) {
+                            e.disabled = false;
+                            e.auto_heal_reason = None;
+                            e.disable_reason = None;
+                            e.failure_count = 0;
+                        }
+                    }
+                    best = entries
+                        .iter()
+                        .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
+                        .min_by_key(|e| e.credentials.priority);
+                }
+
+                if let Some(entry) = best {
                     (entry.id, entry.credentials.clone())
                 } else {
-                    // 当前凭据不可用，选择优先级最高的可用凭据
-                    let mut best = entries
-                        .iter()
-                        .filter(|e| !e.disabled)
-                        .min_by_key(|e| e.credentials.priority);
-
-                    // 没有可用凭据：如果是“自动禁用导致全灭”，做一次类似重启的自愈
-                    if best.is_none()
-                        && entries.iter().any(|e| {
-                            e.disabled
-                                && e.auto_heal_reason == Some(AutoHealReason::TooManyFailures)
-                        })
-                    {
-                        tracing::warn!(
-                            "所有凭据均已被自动禁用，执行自愈：重置失败计数并重新启用（等价于重启）"
-                        );
-                        for e in entries.iter_mut() {
-                            if e.auto_heal_reason == Some(AutoHealReason::TooManyFailures) {
-                                e.disabled = false;
-                                e.auto_heal_reason = None;
-                                e.disable_reason = None;
-                                e.failure_count = 0;
-                            }
-                        }
-                        best = entries
-                            .iter()
-                            .filter(|e| !e.disabled)
-                            .min_by_key(|e| e.credentials.priority);
-                    }
-
-                    if let Some(entry) = best {
-                        // 先提取数据
-                        let new_id = entry.id;
-                        let new_creds = entry.credentials.clone();
-                        drop(entries);
-                        // 更新 current_id
-                        let mut current_id = self.current_id.lock();
-                        *current_id = new_id;
-                        (new_id, new_creds)
-                    } else {
-                        // 注意：必须在 bail! 之前计算 available_count，
-                        // 因为 available_count() 会尝试获取 entries 锁，
-                        // 而此时我们已经持有该锁，会导致死锁
-                        let available = entries.iter().filter(|e| !e.disabled).count();
-                        anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
-                    }
+                    let available = entries.iter().filter(|e| !e.disabled).count();
+                    anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
                 }
             };
 
@@ -783,10 +747,7 @@ impl MultiTokenManager {
                 }
                 Err(e) => {
                     tracing::warn!("凭据 #{} Token 刷新失败，尝试下一个凭据: {}", id, e);
-
-                    // Token 刷新失败，切换到下一个优先级的凭据（不计入失败次数）
-                    self.switch_to_next_by_priority();
-                    tried_count += 1;
+                    tried_ids.push(id);
                 }
             }
         }
@@ -833,27 +794,55 @@ impl MultiTokenManager {
             }
         }
 
-        // 绑定不存在或凭据不可用，选择使用频率最低的凭据（负载均衡）
-        let candidates: Vec<(u64, KiroCredentials)> = {
+        // 绑定不存在或凭据不可用，选择最优凭据（两级判断：使用次数最少 + 余额最多）
+        let candidates: Vec<u64> = {
             let entries = self.entries.lock();
             entries
                 .iter()
                 .filter(|e| !e.disabled)
-                .map(|e| (e.id, e.credentials.clone()))
+                .map(|e| e.id)
                 .collect()
         };
 
-        let least_used = {
+        // 两级排序：先按使用次数升序，再按余额降序
+        // 注意：未初始化的凭据使用 u32::MAX 作为使用次数，避免被优先选中
+        let best_candidate = {
             let cache = self.balance_cache.lock();
             candidates
                 .into_iter()
-                .min_by_key(|(id, _)| cache.get(id).map(|c| c.recent_usage).unwrap_or(0))
+                .map(|id| {
+                    let (usage, balance, initialized) = cache
+                        .get(&id)
+                        .map(|c| (c.recent_usage, c.remaining, c.initialized))
+                        .unwrap_or((0, 0.0, false));
+                    // 未初始化的凭据视为使用次数最大，避免被优先选中
+                    let effective_usage = if initialized { usage } else { u32::MAX };
+                    (id, effective_usage, balance)
+                })
+                .min_by(|(_, usage_a, bal_a), (_, usage_b, bal_b)| {
+                    // 先按使用次数升序，使用次数相同时按余额降序
+                    usage_a.cmp(usage_b).then_with(|| {
+                        bal_b
+                            .partial_cmp(bal_a)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                })
+                .map(|(id, _, _)| id)
         };
 
-        if let Some((id, credentials)) = least_used {
-            if let Ok(ctx) = self.try_ensure_token(id, &credentials).await {
-                self.affinity.set(user_id, ctx.id);
-                return Ok(ctx);
+        if let Some(id) = best_candidate {
+            let credentials = {
+                let entries = self.entries.lock();
+                entries
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map(|e| e.credentials.clone())
+            };
+            if let Some(creds) = credentials {
+                if let Ok(ctx) = self.try_ensure_token(id, &creds).await {
+                    self.affinity.set(user_id, ctx.id);
+                    return Ok(ctx);
+                }
             }
         }
 
@@ -1000,52 +989,6 @@ impl MultiTokenManager {
             .collect()
     }
 
-    /// 切换到下一个优先级最高的可用凭据（内部方法）
-    fn switch_to_next_by_priority(&self) {
-        let entries = self.entries.lock();
-        let mut current_id = self.current_id.lock();
-
-        // 选择优先级最高的未禁用凭据（排除当前凭据）
-        if let Some(entry) = entries
-            .iter()
-            .filter(|e| !e.disabled && e.id != *current_id)
-            .min_by_key(|e| e.credentials.priority)
-        {
-            *current_id = entry.id;
-            tracing::info!(
-                "已切换到凭据 #{}（优先级 {}）",
-                entry.id,
-                entry.credentials.priority
-            );
-        }
-    }
-
-    /// 选择优先级最高的未禁用凭据作为当前凭据（内部方法）
-    ///
-    /// 与 `switch_to_next_by_priority` 不同，此方法不排除当前凭据，
-    /// 纯粹按优先级选择，用于优先级变更后立即生效
-    fn select_highest_priority(&self) {
-        let entries = self.entries.lock();
-        let mut current_id = self.current_id.lock();
-
-        // 选择优先级最高的未禁用凭据（不排除当前凭据）
-        if let Some(best) = entries
-            .iter()
-            .filter(|e| !e.disabled)
-            .min_by_key(|e| e.credentials.priority)
-        {
-            if best.id != *current_id {
-                tracing::info!(
-                    "优先级变更后切换凭据: #{} -> #{}（优先级 {}）",
-                    *current_id,
-                    best.id,
-                    best.credentials.priority
-                );
-                *current_id = best.id;
-            }
-        }
-    }
-
     /// 尝试使用指定凭据获取有效 Token
     ///
     /// 使用双重检查锁定模式，确保同一时间只有一个刷新操作
@@ -1186,14 +1129,13 @@ impl MultiTokenManager {
 
     /// 报告指定凭据 API 调用失败
     ///
-    /// 增加失败计数，达到阈值时禁用凭据并切换到优先级最高的可用凭据
+    /// 增加失败计数，达到阈值时禁用凭据
     /// 返回是否还有可用凭据可以重试
     ///
     /// # Arguments
     /// * `id` - 凭据 ID（来自 CallContext）
     pub fn report_failure(&self, id: u64) -> bool {
         let mut entries = self.entries.lock();
-        let mut current_id = self.current_id.lock();
 
         let entry = match entries.iter_mut().find(|e| e.id == id) {
             Some(e) => e,
@@ -1217,39 +1159,11 @@ impl MultiTokenManager {
             tracing::error!("凭据 #{} 已连续失败 {} 次，已被禁用", id, failure_count);
 
             // 移除该凭据的亲和性绑定
+            drop(entries);
             self.affinity.remove_by_credential(id);
 
-            // 收集可用凭据 ID 和优先级
-            let available: Vec<(u64, u32)> = entries
-                .iter()
-                .filter(|e| !e.disabled)
-                .map(|e| (e.id, e.credentials.priority))
-                .collect();
-
-            // 释放 entries 锁后查询余额缓存
-            drop(entries);
-
-            // 按余额选择，余额相同时按优先级
-            if let Some((next_id, _)) = available.iter().max_by(|(id_a, pri_a), (id_b, pri_b)| {
-                let bal_a = self.get_cached_balance(*id_a);
-                let bal_b = self.get_cached_balance(*id_b);
-                bal_a
-                    .partial_cmp(&bal_b)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| pri_b.cmp(pri_a)) // 优先级小的更优
-            }) {
-                *current_id = *next_id;
-                tracing::info!(
-                    "已切换到凭据 #{}（余额: {:.2}）",
-                    next_id,
-                    self.get_cached_balance(*next_id)
-                );
-            } else {
-                tracing::error!("所有凭据均已禁用！");
-                return false;
-            }
-
-            return true;
+            let entries = self.entries.lock();
+            return entries.iter().any(|e| !e.disabled);
         }
 
         // 检查是否还有可用凭据
@@ -1260,11 +1174,9 @@ impl MultiTokenManager {
     ///
     /// 用于处理 402 Payment Required 且 reason 为 `MONTHLY_REQUEST_COUNT` 的场景：
     /// - 立即禁用该凭据（不等待连续失败阈值）
-    /// - 切换到下一个可用凭据继续重试
     /// - 返回是否还有可用凭据
     pub fn report_quota_exhausted(&self, id: u64) -> bool {
         let mut entries = self.entries.lock();
-        let mut current_id = self.current_id.lock();
 
         let entry = match entries.iter_mut().find(|e| e.id == id) {
             Some(e) => e,
@@ -1280,54 +1192,9 @@ impl MultiTokenManager {
         // 设为阈值，便于在管理面板中直观看到该凭据已不可用
         entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
 
-        tracing::error!(
-            "凭据 #{} 额度已用尽（MONTHLY_REQUEST_COUNT），已被禁用",
-            id
-        );
+        tracing::error!("凭据 #{} 额度已用尽（MONTHLY_REQUEST_COUNT），已被禁用", id);
 
-        // 切换到优先级最高的可用凭据
-        if let Some(next) = entries
-            .iter()
-            .filter(|e| !e.disabled)
-            .min_by_key(|e| e.credentials.priority)
-        {
-            *current_id = next.id;
-            tracing::info!(
-                "已切换到凭据 #{}（优先级 {}）",
-                next.id,
-                next.credentials.priority
-            );
-            return true;
-        }
-
-        tracing::error!("所有凭据均已禁用！");
-        false
-    }
-
-    /// 切换到优先级最高的可用凭据
-    ///
-    /// 返回是否成功切换
-    pub fn switch_to_next(&self) -> bool {
-        let entries = self.entries.lock();
-        let mut current_id = self.current_id.lock();
-
-        // 选择优先级最高的未禁用凭据（排除当前凭据）
-        if let Some(next) = entries
-            .iter()
-            .filter(|e| !e.disabled && e.id != *current_id)
-            .min_by_key(|e| e.credentials.priority)
-        {
-            *current_id = next.id;
-            tracing::info!(
-                "已切换到凭据 #{}（优先级 {}）",
-                next.id,
-                next.credentials.priority
-            );
-            true
-        } else {
-            // 没有其他可用凭据，检查当前凭据是否可用
-            entries.iter().any(|e| e.id == *current_id && !e.disabled)
-        }
+        entries.iter().any(|e| !e.disabled)
     }
 
     /// 报告 MODEL_TEMPORARILY_UNAVAILABLE 错误
@@ -1409,10 +1276,6 @@ impl MultiTokenManager {
 
         if recovered_count > 0 {
             tracing::info!("已自动恢复 {} 个凭据", recovered_count);
-            // 重新选择优先级最高的凭据
-            drop(recovery_time);
-            drop(entries);
-            self.select_highest_priority();
         }
 
         recovered_count > 0
@@ -1446,6 +1309,91 @@ impl MultiTokenManager {
         .await
     }
 
+    /// 初始化所有凭据的余额缓存
+    ///
+    /// 启动时并发查询所有凭据的余额，更新缓存。
+    /// 查询失败的凭据会被跳过（保持 initialized: false）。
+    /// 整体超时 30 秒，避免阻塞启动流程。
+    ///
+    /// # 返回
+    /// - 成功初始化的凭据数量
+    pub async fn initialize_balances(&self) -> usize {
+        let credential_ids: Vec<u64> = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .filter(|e| !e.disabled)
+                .map(|e| e.id)
+                .collect()
+        };
+
+        if credential_ids.is_empty() {
+            tracing::info!("无可用凭据，跳过余额初始化");
+            return 0;
+        }
+
+        tracing::info!("正在初始化 {} 个凭据的余额...", credential_ids.len());
+
+        // 并发查询所有凭据的余额（带整体超时）
+        let futures: Vec<_> = credential_ids
+            .iter()
+            .map(|&id| async move {
+                match self.get_usage_limits_for(id).await {
+                    Ok(limits) => {
+                        // 计算剩余额度
+                        let used = limits.current_usage();
+                        let limit = limits.usage_limit();
+                        let remaining = (limit - used).max(0.0);
+
+                        self.update_balance_cache(id, remaining);
+                        tracing::info!("凭据 #{} 余额初始化成功: {:.2}", id, remaining);
+                        Some((id, remaining))
+                    }
+                    Err(e) => {
+                        tracing::warn!("凭据 #{} 余额查询失败: {}", id, e);
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        // 整体超时 30 秒，避免阻塞启动
+        // 注意：即使超时，已完成的凭据缓存已在 future 内部更新
+        let results: Vec<Option<(u64, f64)>> = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            futures::future::join_all(futures),
+        )
+        .await
+        {
+            Ok(results) => results,
+            Err(_) => {
+                // 超时时统计已初始化的凭据数量
+                let initialized_count = {
+                    let cache = self.balance_cache.lock();
+                    credential_ids
+                        .iter()
+                        .filter(|id| cache.get(id).map(|c| c.initialized).unwrap_or(false))
+                        .count()
+                };
+                tracing::warn!(
+                    "余额初始化超时（30秒），已完成 {}/{} 个凭据",
+                    initialized_count,
+                    credential_ids.len()
+                );
+                return initialized_count;
+            }
+        };
+        let success_count = results.iter().filter(|r| r.is_some()).count();
+
+        tracing::info!(
+            "余额初始化完成: {}/{} 成功",
+            success_count,
+            credential_ids.len()
+        );
+
+        success_count
+    }
+
     // ========================================================================
     // Admin API 方法
     // ========================================================================
@@ -1453,7 +1401,6 @@ impl MultiTokenManager {
     /// 获取管理器状态快照（用于 Admin API）
     pub fn snapshot(&self) -> ManagerSnapshot {
         let entries = self.entries.lock();
-        let current_id = *self.current_id.lock();
         let available = entries.iter().filter(|e| !e.disabled).count();
 
         ManagerSnapshot {
@@ -1470,7 +1417,6 @@ impl MultiTokenManager {
                     expires_at: e.credentials.expires_at.clone(),
                 })
                 .collect(),
-            current_id,
             total: entries.len(),
             available,
         }
@@ -1501,9 +1447,6 @@ impl MultiTokenManager {
     }
 
     /// 设置凭据优先级（Admin API）
-    ///
-    /// 修改优先级后会立即按新优先级重新选择当前凭据。
-    /// 即使持久化失败，内存中的优先级和当前凭据选择也会生效。
     pub fn set_priority(&self, id: u64, priority: u32) -> anyhow::Result<()> {
         {
             let mut entries = self.entries.lock();
@@ -1513,8 +1456,6 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
             entry.credentials.priority = priority;
         }
-        // 立即按新优先级重新选择当前凭据（无论持久化是否成功）
-        self.select_highest_priority();
         // 持久化更改
         self.persist_credentials()?;
         Ok(())
@@ -1664,15 +1605,13 @@ impl MultiTokenManager {
     /// 1. 验证凭据存在
     /// 2. 验证凭据已禁用
     /// 3. 从 entries 移除
-    /// 4. 如果删除的是当前凭据，切换到优先级最高的可用凭据
-    /// 5. 如果删除后没有凭据，将 current_id 重置为 0
-    /// 6. 持久化到文件
+    /// 4. 持久化到文件
     ///
     /// # 返回
     /// - `Ok(())` - 删除成功
     /// - `Err(_)` - 凭据不存在、未禁用或持久化失败
     pub fn delete_credential(&self, id: u64) -> anyhow::Result<()> {
-        let was_current = {
+        {
             let mut entries = self.entries.lock();
 
             // 查找凭据
@@ -1686,29 +1625,8 @@ impl MultiTokenManager {
                 anyhow::bail!("只能删除已禁用的凭据（请先禁用凭据 #{}）", id);
             }
 
-            // 记录是否是当前凭据
-            let current_id = *self.current_id.lock();
-            let was_current = current_id == id;
-
             // 删除凭据
             entries.retain(|e| e.id != id);
-
-            was_current
-        };
-
-        // 如果删除的是当前凭据，切换到优先级最高的可用凭据
-        if was_current {
-            self.select_highest_priority();
-        }
-
-        // 如果删除后没有任何凭据，将 current_id 重置为 0（与初始化行为保持一致）
-        {
-            let entries = self.entries.lock();
-            if entries.is_empty() {
-                let mut current_id = self.current_id.lock();
-                *current_id = 0;
-                tracing::info!("所有凭据已删除，current_id 已重置为 0");
-            }
         }
 
         // 持久化更改
@@ -1846,17 +1764,15 @@ mod tests {
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
         // 凭据会自动分配 ID（从 1 开始）
-        // 前两次失败不会禁用（使用 ID 1）
-        assert!(manager.report_failure(1));
+        // MAX_FAILURES_PER_CREDENTIAL = 2，所以第一次失败不会禁用
         assert!(manager.report_failure(1));
         assert_eq!(manager.available_count(), 2);
 
-        // 第三次失败会禁用第一个凭据
+        // 第二次失败会禁用第一个凭据
         assert!(manager.report_failure(1));
         assert_eq!(manager.available_count(), 1);
 
         // 继续失败第二个凭据（使用 ID 2）
-        assert!(manager.report_failure(2));
         assert!(manager.report_failure(2));
         assert!(!manager.report_failure(2)); // 所有凭据都禁用了
         assert_eq!(manager.available_count(), 0);
@@ -1869,42 +1785,15 @@ mod tests {
 
         let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
 
-        // 失败两次（使用 ID 1）
-        manager.report_failure(1);
+        // 失败一次（使用 ID 1）
         manager.report_failure(1);
 
         // 成功后重置计数（使用 ID 1）
         manager.report_success(1);
 
-        // 再失败两次不会禁用
-        manager.report_failure(1);
+        // 再失败一次不会禁用（因为计数已重置）
         manager.report_failure(1);
         assert_eq!(manager.available_count(), 1);
-    }
-
-    #[test]
-    fn test_multi_token_manager_switch_to_next() {
-        let config = Config::default();
-        let mut cred1 = KiroCredentials::default();
-        cred1.refresh_token = Some("token1".to_string());
-        let mut cred2 = KiroCredentials::default();
-        cred2.refresh_token = Some("token2".to_string());
-
-        let manager =
-            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
-
-        // 初始是第一个凭据
-        assert_eq!(
-            manager.credentials().refresh_token,
-            Some("token1".to_string())
-        );
-
-        // 切换到下一个
-        assert!(manager.switch_to_next());
-        assert_eq!(
-            manager.credentials().refresh_token,
-            Some("token2".to_string())
-        );
     }
 
     #[tokio::test]

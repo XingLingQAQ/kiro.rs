@@ -283,7 +283,12 @@ impl KiroProvider {
                     );
                 }
 
-                last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
+                last_error = Some(anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                ));
                 continue;
             }
 

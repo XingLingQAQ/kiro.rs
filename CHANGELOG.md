@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Removed
+- 移除 `current_id` 概念（后端和前端）
+  - 后端：移除 `MultiTokenManager.current_id` 字段和相关方法（`switch_to_next`、`select_highest_priority`、`select_by_balance`、`credentials`）
+  - 后端：移除 `ManagerSnapshot.current_id` 字段
+  - 后端：移除 `CredentialStatusItem.is_current` 字段
+  - 前端：移除 `CredentialsStatusResponse.currentId` 和 `CredentialStatusItem.isCurrent`
+  - 原因：多用户并发访问时，"当前凭据"概念无意义，凭据选择由 `acquire_context_for_user()` 动态决定
+
+### Added
+- 新增启动时余额初始化功能
+  - `initialize_balances()`: 启动时并发查询所有凭据余额并更新缓存
+  - 整体超时 30 秒，避免阻塞启动流程
+  - 初始化失败或超时时输出警告日志
+
+### Changed
+- 改进凭据选择算法：从单一"使用次数最少"改为两级排序
+  - 第一优先级：使用次数最少
+  - 第二优先级：余额最多（使用次数相同时）
+  - 未初始化余额的凭据会被降级处理，避免被优先选中
+- 移除前端"当前活跃"凭据展示
+  - 前端：移除凭据卡片的"当前"高亮和 Badge
+  - 前端：移除 Dashboard 中的"当前活跃"统计卡片
+  - 统计卡片布局从 3 列调整为 2 列
+
 ### Added
 - 新增 `sensitive-logs` feature flag，显式启用才允许打印潜在敏感信息（仅用于排障）
   - 默认关闭：Kiro 请求体只输出长度，凭证只输出摘要信息
