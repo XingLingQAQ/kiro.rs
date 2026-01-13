@@ -133,14 +133,11 @@ export function CredentialCard({ credential, cachedBalance, onViewBalance }: Cre
 
   return (
     <>
-      <Card className={credential.isCurrent ? 'ring-2 ring-primary' : ''}>
+      <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-lg flex items-center gap-2">
               凭据 #{credential.id}
-              {credential.isCurrent && (
-                <Badge variant="success">当前</Badge>
-              )}
               {credential.disabled && (
                 <Badge variant="destructive">已禁用</Badge>
               )}

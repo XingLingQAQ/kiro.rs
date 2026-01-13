@@ -2,7 +2,6 @@
 export interface CredentialsStatusResponse {
   total: number
   available: number
-  currentId: number
   credentials: CredentialStatusItem[]
 }
 
@@ -12,7 +11,6 @@ export interface CredentialStatusItem {
   priority: number
   disabled: boolean
   failureCount: number
-  isCurrent: boolean
   expiresAt: string | null
   authMethod: string | null
   hasProfileArn: boolean
