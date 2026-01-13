@@ -27,6 +27,7 @@ use super::stream::{SseEvent, StreamContext};
 use super::types::{
     CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse,
 };
+use super::websearch;
 
 /// 对 user_id 进行掩码处理，保护隐私
 fn mask_user_id(user_id: Option<&str>) -> String {
@@ -113,6 +114,21 @@ pub async fn post_messages(
                 .into_response();
         }
     };
+
+    // 检查是否为 WebSearch 请求
+    if websearch::has_web_search_tool(&payload) {
+        tracing::info!("检测到 WebSearch 工具，路由到 WebSearch 处理");
+
+        // 估算输入 tokens
+        let input_tokens = token::count_all_tokens(
+            payload.model.clone(),
+            payload.system.clone(),
+            payload.messages.clone(),
+            payload.tools.clone(),
+        ) as i32;
+
+        return websearch::handle_websearch_request(provider, &payload, input_tokens).await;
+    }
 
     // 转换请求
     let conversion_result = match convert_request(&payload) {
@@ -423,7 +439,7 @@ async fn handle_non_stream_request(
                             // 累积工具的 JSON 输入
                             let buffer = tool_json_buffers
                                 .entry(tool_use.tool_use_id.clone())
-                                .or_insert_with(String::new);
+                                .or_default();
                             buffer.push_str(&tool_use.input);
 
                             // 如果是完整的工具调用，添加到列表

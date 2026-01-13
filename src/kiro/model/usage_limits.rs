@@ -2,7 +2,7 @@
 //!
 //! 包含 getUsageLimits API 的响应类型定义
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::Deserialize;
 
 /// 使用额度查询响应
@@ -34,6 +34,7 @@ pub struct SubscriptionInfo {
 /// 使用量明细
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct UsageBreakdown {
     /// 当前使用量
     #[serde(default)]
@@ -66,6 +67,7 @@ pub struct UsageBreakdown {
 /// 额外用量包信息（如 GIFT 类型）
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct Bonus {
     /// 用量包代码
     #[serde(default)]
@@ -95,6 +97,7 @@ pub struct Bonus {
 /// 免费试用信息
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct FreeTrialInfo {
     /// 当前使用量
     #[serde(default)]

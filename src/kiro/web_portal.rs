@@ -7,6 +7,8 @@
 //! - Authorization: Bearer <accessToken>
 //! - Cookie: Idp=<idp>; AccessToken=<accessToken>
 
+#![allow(dead_code)]
+
 use std::time::Duration;
 
 use anyhow::Context;
@@ -15,7 +17,9 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderMap, He
 
 use crate::http_client::{ProxyConfig, build_client};
 
+#[allow(dead_code)]
 const KIRO_API_BASE: &str = "https://app.kiro.dev/service/KiroWebPortalService/operation";
+#[allow(dead_code)]
 const SMITHY_PROTOCOL: &str = "rpc-v2-cbor";
 const AMZ_SDK_REQUEST: &str = "attempt=1; max=1";
 const X_AMZ_USER_AGENT: &str = "aws-sdk-js/1.0.0 kiro-rs/1.0.0";
@@ -203,7 +207,7 @@ where
             let type_name = err
                 .type_name
                 .as_deref()
-                .and_then(|s| s.split('#').last())
+                .and_then(|s| s.split('#').next_back())
                 .unwrap_or("HTTPError");
             let msg = err.message.unwrap_or_else(|| format!("HTTP {}", status));
             anyhow::bail!("{}: {}", type_name, msg);
@@ -381,10 +385,10 @@ fn bonus_is_effective(b: &Bonus) -> bool {
         Some(s) => s.eq_ignore_ascii_case("ACTIVE"),
         None => {
             // 没有 status 时：优先用 expiresAt 判断是否仍有效；再用 limit/current 兜底。
-            if let Some(exp) = b.expires_at.as_deref() {
-                if let Some(dt) = parse_rfc3339(exp) {
-                    return dt > Utc::now();
-                }
+            if let Some(exp) = b.expires_at.as_deref()
+                && let Some(dt) = parse_rfc3339(exp)
+            {
+                return dt > Utc::now();
             }
             let limit = pick_f64(b.usage_limit_with_precision, b.usage_limit);
             let current = pick_f64(b.current_usage_with_precision, b.current_usage);

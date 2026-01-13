@@ -77,6 +77,7 @@ impl UserAffinityManager {
     }
 
     /// 清理过期条目
+    #[allow(dead_code)]
     pub fn cleanup(&self) {
         let mut map = self.affinity.lock();
         let ttl = self.ttl;

@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Added
+- 新增 WebSearch 工具支持（`src/anthropic/websearch.rs`）
+  - 实现 Anthropic WebSearch 请求到 Kiro MCP 的转换
+  - 支持 SSE 流式响应，生成完整的搜索结果事件序列
+  - 自动检测纯 WebSearch 请求（tools 仅包含 web_search）并路由到专用处理器
+- 新增 MCP API 调用支持（`src/kiro/provider.rs`）
+  - 新增 `call_mcp()` 方法，支持 WebSearch 等工具调用
+  - 新增 `mcp_url()` 和 `build_mcp_headers()` 方法
+  - 完整的重试和故障转移逻辑
+- 新增凭据级 `region` 字段，用于 OIDC token 刷新时指定 endpoint 区域
+  - 未配置时回退到 config.json 的全局 region
+  - API 调用仍使用 config.json 的 region
+- 新增凭据级 `machineId` 字段，支持每个凭据使用独立的机器码
+  - 支持 64 字符十六进制和 UUID 格式（自动标准化）
+  - 未配置时回退到 config.json 的 machineId，都未配置时由 refreshToken 派生
+  - 启动时自动补全并持久化到配置文件
+- 新增 GitHub Actions Docker 构建工作流（`.github/workflows/docker-build.yaml`）
+  - 支持 linux/amd64 和 linux/arm64 双架构
+  - 推送到 GitHub Container Registry
+
+### Changed
+- 版本号升级至 2026.1.5
+- TLS 库从 native-tls 切换至 rustls（reqwest 依赖调整）
+- `authMethod` 自动推断：未指定时根据是否有 clientId/clientSecret 自动判断为 idc 或 social
+- 移除 web_search/websearch 工具过滤（`is_unsupported_tool` 现在返回 false）
+
+### Fixed
+- 修复 machineId 格式兼容性问题，支持 UUID 格式自动转换为 64 字符十六进制
+
 ### Removed
 - 移除 `current_id` 概念（后端和前端）
   - 后端：移除 `MultiTokenManager.current_id` 字段和相关方法（`switch_to_next`、`select_highest_priority`、`select_by_balance`、`credentials`）

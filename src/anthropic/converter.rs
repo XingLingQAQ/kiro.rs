@@ -85,12 +85,12 @@ fn collect_history_tool_names(history: &[Message]) -> Vec<String> {
     let mut tool_names = Vec::new();
 
     for msg in history {
-        if let Message::Assistant(assistant_msg) = msg {
-            if let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses {
-                for tool_use in tool_uses {
-                    if !tool_names.contains(&tool_use.name) {
-                        tool_names.push(tool_use.name.clone());
-                    }
+        if let Message::Assistant(assistant_msg) = msg
+            && let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses
+        {
+            for tool_use in tool_uses {
+                if !tool_names.contains(&tool_use.name) {
+                    tool_names.push(tool_use.name.clone());
                 }
             }
         }
@@ -232,10 +232,10 @@ fn process_message_content(
                             }
                         }
                         "image" => {
-                            if let Some(source) = block.source {
-                                if let Some(format) = get_image_format(&source.media_type) {
-                                    images.push(KiroImage::from_base64(format, source.data));
-                                }
+                            if let Some(source) = block.source
+                                && let Some(format) = get_image_format(&source.media_type)
+                            {
+                                images.push(KiroImage::from_base64(format, source.data));
                             }
                         }
                         "tool_result" => {
@@ -439,19 +439,21 @@ fn convert_tools(tools: &Option<Vec<serde_json::Value>>) -> Vec<Tool> {
 }
 
 /// 检查是否为不支持的工具
-fn is_unsupported_tool(name: &str) -> bool {
-    name.eq_ignore_ascii_case("web_search") || name.eq_ignore_ascii_case("websearch")
+///
+/// 当前不过滤任何工具（upstream 已支持 web_search）
+fn is_unsupported_tool(_name: &str) -> bool {
+    false
 }
 
 /// 生成thinking标签前缀
 fn generate_thinking_prefix(thinking: &Option<Thinking>) -> Option<String> {
-    if let Some(t) = thinking {
-        if t.thinking_type == "enabled" {
-            return Some(format!(
-                "<thinking_mode>enabled</thinking_mode><max_thinking_length>{}</max_thinking_length>",
-                t.budget_tokens
-            ));
-        }
+    if let Some(t) = thinking
+        && t.thinking_type == "enabled"
+    {
+        return Some(format!(
+            "<thinking_mode>enabled</thinking_mode><max_thinking_length>{}</max_thinking_length>",
+            t.budget_tokens
+        ));
     }
     None
 }
@@ -621,10 +623,10 @@ fn convert_assistant_message(
                         }
                         "tool_use" => {
                             // 过滤不支持的工具
-                            if let Some(ref name) = block.name {
-                                if is_unsupported_tool(name) {
-                                    continue;
-                                }
+                            if let Some(ref name) = block.name
+                                && is_unsupported_tool(name)
+                            {
+                                continue;
                             }
 
                             if let (Some(id), Some(name)) = (block.id, block.name) {
@@ -725,9 +727,10 @@ mod tests {
 
     #[test]
     fn test_is_unsupported_tool() {
-        assert!(is_unsupported_tool("web_search"));
-        assert!(is_unsupported_tool("websearch"));
-        assert!(is_unsupported_tool("WebSearch"));
+        // upstream 已支持 web_search，不再过滤任何工具
+        assert!(!is_unsupported_tool("web_search"));
+        assert!(!is_unsupported_tool("websearch"));
+        assert!(!is_unsupported_tool("WebSearch"));
         assert!(!is_unsupported_tool("read_file"));
     }
 
@@ -772,8 +775,8 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_tools_skips_unsupported() {
-        // 不支持的工具名称应被跳过
+    fn test_convert_tools_includes_all() {
+        // upstream 已支持 web_search，不再过滤任何工具
         let tools = Some(vec![
             serde_json::json!({
                 "name": "web_search",
@@ -790,8 +793,7 @@ mod tests {
         ]);
 
         let result = convert_tools(&tools);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].tool_specification.name, "read_file");
+        assert_eq!(result.len(), 3);
     }
 
     #[test]

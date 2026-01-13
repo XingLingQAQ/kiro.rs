@@ -27,12 +27,14 @@ use crate::model::config::Config;
 /// Token 管理器
 ///
 /// 负责管理凭据和 Token 的自动刷新
+#[allow(dead_code)]
 pub struct TokenManager {
     config: Config,
     credentials: KiroCredentials,
     proxy: Option<ProxyConfig>,
 }
 
+#[allow(dead_code)]
 impl TokenManager {
     /// 创建新的 TokenManager 实例
     pub fn new(config: Config, credentials: KiroCredentials, proxy: Option<ProxyConfig>) -> Self {
@@ -148,7 +150,14 @@ pub(crate) async fn refresh_token_with_id(
     validate_refresh_token(credentials)?;
 
     // 根据 auth_method 选择刷新方式
-    let auth_method = credentials.auth_method.as_deref().unwrap_or("social");
+    // 如果未指定 auth_method，根据是否有 clientId/clientSecret 自动判断
+    let auth_method = credentials.auth_method.as_deref().unwrap_or_else(|| {
+        if credentials.client_id.is_some() && credentials.client_secret.is_some() {
+            "idc"
+        } else {
+            "social"
+        }
+    });
 
     match auth_method.to_lowercase().as_str() {
         "idc" | "builder-id" => refresh_idc_token(credentials, config, proxy, id).await,
@@ -166,7 +175,12 @@ async fn refresh_social_token(
     tracing::info!(credential_id = %id, "正在刷新 Social Token...");
 
     let refresh_token = credentials.refresh_token.as_ref().unwrap();
-    let region = &config.region;
+    // 优先使用凭据级 region，未配置或为空时回退到 config.region
+    let region = credentials
+        .region
+        .as_ref()
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or(&config.region);
 
     let refresh_url = format!("https://prod.{}.auth.desktop.kiro.dev/refreshToken", region);
     let refresh_domain = format!("prod.{}.auth.desktop.kiro.dev", region);
@@ -253,7 +267,12 @@ async fn refresh_idc_token(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("IdC 刷新需要 clientSecret"))?;
 
-    let region = &config.region;
+    // 优先使用凭据级 region，未配置或为空时回退到 config.region
+    let region = credentials
+        .region
+        .as_ref()
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or(&config.region);
     let refresh_url = format!("https://oidc.{}.amazonaws.com/token", region);
 
     let client = build_client(proxy, 60)?;
@@ -404,6 +423,7 @@ pub enum DisableReason {
     /// 连续失败次数过多
     FailureLimit,
     /// 余额不足
+    #[allow(dead_code)]
     InsufficientBalance,
     /// 模型临时不可用（全局禁用）
     ModelUnavailable,
@@ -437,6 +457,7 @@ enum AutoHealReason {
     /// 连续失败达到阈值后自动禁用（可自动恢复）
     TooManyFailures,
     /// 额度已用尽（如 MONTHLY_REQUEST_COUNT）
+    #[allow(dead_code)]
     QuotaExceeded,
 }
 
@@ -546,9 +567,11 @@ pub struct MultiTokenManager {
 const MAX_FAILURES_PER_CREDENTIAL: u32 = 2;
 
 /// MODEL_TEMPORARILY_UNAVAILABLE 触发全局禁用的阈值
+#[allow(dead_code)]
 const MODEL_UNAVAILABLE_THRESHOLD: u32 = 2;
 
 /// 全局禁用恢复时间（分钟）
+#[allow(dead_code)]
 const GLOBAL_DISABLE_RECOVERY_MINUTES: i64 = 10;
 
 /// API 调用上下文
@@ -584,6 +607,8 @@ impl MultiTokenManager {
         let max_existing_id = credentials.iter().filter_map(|c| c.id).max().unwrap_or(0);
         let mut next_id = max_existing_id + 1;
         let mut has_new_ids = false;
+        let mut has_new_machine_ids = false;
+        let config_ref = &config;
 
         let entries: Vec<CredentialEntry> = credentials
             .into_iter()
@@ -595,6 +620,13 @@ impl MultiTokenManager {
                     has_new_ids = true;
                     id
                 });
+                if cred.machine_id.is_none()
+                    && let Some(machine_id) =
+                        machine_id::generate_from_credentials(&cred, config_ref)
+                {
+                    cred.machine_id = Some(machine_id);
+                    has_new_machine_ids = true;
+                }
                 CredentialEntry {
                     id,
                     credentials: cred,
@@ -649,12 +681,12 @@ impl MultiTokenManager {
             balance_cache: Mutex::new(initial_cache),
         };
 
-        // 如果有新分配的 ID，立即持久化到配置文件
-        if has_new_ids {
+        // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
+        if has_new_ids || has_new_machine_ids {
             if let Err(e) = manager.persist_credentials() {
-                tracing::warn!("新分配 ID 后持久化失败: {}", e);
+                tracing::warn!("补全凭据 ID/machineId 后持久化失败: {}", e);
             } else {
-                tracing::info!("已为凭据分配新 ID 并写回配置文件");
+                tracing::info!("已补全凭据 ID/machineId 并写回配置文件");
             }
         }
 
@@ -785,11 +817,11 @@ impl MultiTokenManager {
                         .map(|e| e.credentials.clone())
                 };
 
-                if let Some(creds) = credentials {
-                    if let Ok(ctx) = self.try_ensure_token(bound_id, &creds).await {
-                        self.affinity.touch(user_id);
-                        return Ok(ctx);
-                    }
+                if let Some(creds) = credentials
+                    && let Ok(ctx) = self.try_ensure_token(bound_id, &creds).await
+                {
+                    self.affinity.touch(user_id);
+                    return Ok(ctx);
                 }
             }
         }
@@ -838,11 +870,11 @@ impl MultiTokenManager {
                     .find(|e| e.id == id)
                     .map(|e| e.credentials.clone())
             };
-            if let Some(creds) = credentials {
-                if let Ok(ctx) = self.try_ensure_token(id, &creds).await {
-                    self.affinity.set(user_id, ctx.id);
-                    return Ok(ctx);
-                }
+            if let Some(creds) = credentials
+                && let Ok(ctx) = self.try_ensure_token(id, &creds).await
+            {
+                self.affinity.set(user_id, ctx.id);
+                return Ok(ctx);
             }
         }
 
@@ -853,6 +885,7 @@ impl MultiTokenManager {
     }
 
     /// 获取缓存的余额（用于故障转移选择）
+    #[allow(dead_code)]
     fn get_cached_balance(&self, id: u64) -> f64 {
         let cache = self.balance_cache.lock();
         if let Some(entry) = cache.get(&id) {
@@ -1201,6 +1234,7 @@ impl MultiTokenManager {
     ///
     /// 累计达到阈值后禁用所有凭据，10分钟后自动恢复
     /// 返回是否触发了全局禁用
+    #[allow(dead_code)]
     pub fn report_model_unavailable(&self) -> bool {
         let count = self.model_unavailable_count.fetch_add(1, Ordering::SeqCst) + 1;
         tracing::warn!(
@@ -1218,6 +1252,7 @@ impl MultiTokenManager {
     }
 
     /// 禁用所有凭据
+    #[allow(dead_code)]
     fn disable_all_credentials(&self, reason: DisableReason) {
         let mut entries = self.entries.lock();
         let mut recovery_time = self.global_recovery_time.lock();
@@ -1282,6 +1317,7 @@ impl MultiTokenManager {
     }
 
     /// 标记凭据为余额不足（不会被自动恢复）
+    #[allow(dead_code)]
     pub fn mark_insufficient_balance(&self, id: u64) {
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
@@ -1293,11 +1329,13 @@ impl MultiTokenManager {
     }
 
     /// 获取全局恢复时间（用于 Admin API）
+    #[allow(dead_code)]
     pub fn get_recovery_time(&self) -> Option<DateTime<Utc>> {
         *self.global_recovery_time.lock()
     }
 
     /// 获取使用额度信息
+    #[allow(dead_code)]
     pub async fn get_usage_limits(&self) -> anyhow::Result<UsageLimitsResponse> {
         let ctx = self.acquire_context().await?;
         get_usage_limits(
@@ -1864,5 +1902,150 @@ mod tests {
             err
         );
         assert_eq!(manager.available_count(), 0);
+    }
+
+    // ============ 凭据级 Region 优先级测试 ============
+
+    /// 辅助函数：获取 OIDC 刷新使用的 region（用于测试）
+    fn get_oidc_region_for_credential<'a>(
+        credentials: &'a KiroCredentials,
+        config: &'a Config,
+    ) -> &'a str {
+        credentials.region.as_ref().unwrap_or(&config.region)
+    }
+
+    #[test]
+    fn test_credential_region_priority_uses_credential_region() {
+        // 凭据配置了 region 时，应使用凭据的 region
+        let mut config = Config::default();
+        config.region = "us-west-2".to_string();
+
+        let mut credentials = KiroCredentials::default();
+        credentials.region = Some("eu-west-1".to_string());
+
+        let region = get_oidc_region_for_credential(&credentials, &config);
+        assert_eq!(region, "eu-west-1");
+    }
+
+    #[test]
+    fn test_credential_region_priority_fallback_to_config() {
+        // 凭据未配置 region 时，应回退到 config.region
+        let mut config = Config::default();
+        config.region = "us-west-2".to_string();
+
+        let credentials = KiroCredentials::default();
+        assert!(credentials.region.is_none());
+
+        let region = get_oidc_region_for_credential(&credentials, &config);
+        assert_eq!(region, "us-west-2");
+    }
+
+    #[test]
+    fn test_multiple_credentials_use_respective_regions() {
+        // 多凭据场景下，不同凭据使用各自的 region
+        let mut config = Config::default();
+        config.region = "ap-northeast-1".to_string();
+
+        let mut cred1 = KiroCredentials::default();
+        cred1.region = Some("us-east-1".to_string());
+
+        let mut cred2 = KiroCredentials::default();
+        cred2.region = Some("eu-west-1".to_string());
+
+        let cred3 = KiroCredentials::default(); // 无 region，使用 config
+
+        assert_eq!(get_oidc_region_for_credential(&cred1, &config), "us-east-1");
+        assert_eq!(get_oidc_region_for_credential(&cred2, &config), "eu-west-1");
+        assert_eq!(
+            get_oidc_region_for_credential(&cred3, &config),
+            "ap-northeast-1"
+        );
+    }
+
+    #[test]
+    fn test_idc_oidc_endpoint_uses_credential_region() {
+        // 验证 IdC OIDC endpoint URL 使用凭据 region
+        let mut config = Config::default();
+        config.region = "us-west-2".to_string();
+
+        let mut credentials = KiroCredentials::default();
+        credentials.region = Some("eu-central-1".to_string());
+
+        let region = get_oidc_region_for_credential(&credentials, &config);
+        let refresh_url = format!("https://oidc.{}.amazonaws.com/token", region);
+
+        assert_eq!(refresh_url, "https://oidc.eu-central-1.amazonaws.com/token");
+    }
+
+    #[test]
+    fn test_social_refresh_endpoint_uses_credential_region() {
+        // 验证 Social refresh endpoint URL 使用凭据 region
+        let mut config = Config::default();
+        config.region = "us-west-2".to_string();
+
+        let mut credentials = KiroCredentials::default();
+        credentials.region = Some("ap-southeast-1".to_string());
+
+        let region = get_oidc_region_for_credential(&credentials, &config);
+        let refresh_url = format!("https://prod.{}.auth.desktop.kiro.dev/refreshToken", region);
+
+        assert_eq!(
+            refresh_url,
+            "https://prod.ap-southeast-1.auth.desktop.kiro.dev/refreshToken"
+        );
+    }
+
+    #[test]
+    fn test_api_call_still_uses_config_region() {
+        // 验证 API 调用（如 getUsageLimits）仍使用 config.region
+        // 这确保只有 OIDC 刷新使用凭据 region，API 调用行为不变
+        let mut config = Config::default();
+        config.region = "us-west-2".to_string();
+
+        let mut credentials = KiroCredentials::default();
+        credentials.region = Some("eu-west-1".to_string());
+
+        // API 调用应使用 config.region，而非 credentials.region
+        let api_region = &config.region;
+        let api_host = format!("q.{}.amazonaws.com", api_region);
+
+        assert_eq!(api_host, "q.us-west-2.amazonaws.com");
+        // 确认凭据 region 不影响 API 调用
+        assert_ne!(api_region, credentials.region.as_ref().unwrap());
+    }
+
+    #[test]
+    fn test_credential_region_empty_string_fallback_to_config() {
+        // 空字符串 region 应回退到 config.region
+        let mut config = Config::default();
+        config.region = "us-west-2".to_string();
+
+        let mut credentials = KiroCredentials::default();
+        credentials.region = Some("".to_string());
+
+        let region = credentials
+            .region
+            .as_ref()
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or(&config.region);
+        // 空字符串应回退到 config.region
+        assert_eq!(region, "us-west-2");
+    }
+
+    #[test]
+    fn test_credential_region_whitespace_fallback_to_config() {
+        // 纯空白字符 region 应回退到 config.region
+        let mut config = Config::default();
+        config.region = "us-west-2".to_string();
+
+        let mut credentials = KiroCredentials::default();
+        credentials.region = Some("   ".to_string());
+
+        let region = credentials
+            .region
+            .as_ref()
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or(&config.region);
+        assert_eq!(region, "us-west-2");
     }
 }

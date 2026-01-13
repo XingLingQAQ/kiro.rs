@@ -104,6 +104,7 @@ pub struct MessagesRequest {
     pub system: Option<Vec<SystemMessage>>,
     /// tools 可以是普通 Tool 或 WebSearchTool 等多种格式，使用 Value 灵活处理
     pub tools: Option<Vec<serde_json::Value>>,
+    #[allow(dead_code)]
     pub tool_choice: Option<serde_json::Value>,
     pub thinking: Option<Thinking>,
     /// Claude Code 请求中的 metadata，包含 session 信息
