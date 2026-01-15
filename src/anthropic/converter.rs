@@ -619,7 +619,7 @@ fn convert_assistant_message(
             format!("<thinking>{}</thinking>", thinking_content)
         }
     } else if text_content.is_empty() && !tool_uses.is_empty() {
-        "OK".to_string()
+        "There is a tool use.".to_string()
     } else {
         text_content
     };
