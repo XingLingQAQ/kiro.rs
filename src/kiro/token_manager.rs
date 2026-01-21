@@ -145,7 +145,7 @@ pub(crate) async fn refresh_token_with_id(
     credentials: &KiroCredentials,
     config: &Config,
     proxy: Option<&ProxyConfig>,
-    id: u64,
+    _id: u64,
 ) -> anyhow::Result<KiroCredentials> {
     validate_refresh_token(credentials)?;
 
@@ -159,9 +159,13 @@ pub(crate) async fn refresh_token_with_id(
         }
     });
 
-    match auth_method.to_lowercase().as_str() {
-        "idc" | "builder-id" => refresh_idc_token(credentials, config, proxy, id).await,
-        _ => refresh_social_token(credentials, config, proxy, id).await,
+    if auth_method.eq_ignore_ascii_case("idc")
+        || auth_method.eq_ignore_ascii_case("builder-id")
+        || auth_method.eq_ignore_ascii_case("iam")
+    {
+        refresh_idc_token(credentials, config, proxy).await
+    } else {
+        refresh_social_token(credentials, config, proxy).await
     }
 }
 
@@ -170,9 +174,8 @@ async fn refresh_social_token(
     credentials: &KiroCredentials,
     config: &Config,
     proxy: Option<&ProxyConfig>,
-    id: u64,
 ) -> anyhow::Result<KiroCredentials> {
-    tracing::info!(credential_id = %id, "正在刷新 Social Token...");
+    tracing::info!("正在刷新 Social Token...");
 
     let refresh_token = credentials.refresh_token.as_ref().unwrap();
     // 优先使用凭据级 region，未配置或为空时回退到 config.region
@@ -188,7 +191,7 @@ async fn refresh_social_token(
         .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
     let kiro_version = &config.kiro_version;
 
-    let client = build_client(proxy, 60)?;
+    let client = build_client(proxy, 60, config.tls_backend)?;
     let body = RefreshRequest {
         refresh_token: refresh_token.to_string(),
     };
@@ -237,9 +240,9 @@ async fn refresh_social_token(
     if let Some(expires_in) = data.expires_in {
         let expires_at = Utc::now() + Duration::seconds(expires_in);
         new_credentials.expires_at = Some(expires_at.to_rfc3339());
-        tracing::info!(credential_id = %id, expires_in = %expires_in, "Social Token 刷新成功");
+        tracing::info!(expires_in = %expires_in, "Social Token 刷新成功");
     } else {
-        tracing::info!(credential_id = %id, "Social Token 刷新成功（无过期时间）");
+        tracing::info!("Social Token 刷新成功（无过期时间）");
     }
 
     Ok(new_credentials)
@@ -253,9 +256,8 @@ async fn refresh_idc_token(
     credentials: &KiroCredentials,
     config: &Config,
     proxy: Option<&ProxyConfig>,
-    id: u64,
 ) -> anyhow::Result<KiroCredentials> {
-    tracing::info!(credential_id = %id, "正在刷新 IdC Token...");
+    tracing::info!("正在刷新 IdC Token...");
 
     let refresh_token = credentials.refresh_token.as_ref().unwrap();
     let client_id = credentials
@@ -275,7 +277,7 @@ async fn refresh_idc_token(
         .unwrap_or(&config.region);
     let refresh_url = format!("https://oidc.{}.amazonaws.com/token", region);
 
-    let client = build_client(proxy, 60)?;
+    let client = build_client(proxy, 60, config.tls_backend)?;
     let body = IdcRefreshRequest {
         client_id: client_id.to_string(),
         client_secret: client_secret.to_string(),
@@ -323,9 +325,9 @@ async fn refresh_idc_token(
     if let Some(expires_in) = data.expires_in {
         let expires_at = Utc::now() + Duration::seconds(expires_in);
         new_credentials.expires_at = Some(expires_at.to_rfc3339());
-        tracing::info!(credential_id = %id, expires_in = %expires_in, "IdC Token 刷新成功");
+        tracing::info!(expires_in = %expires_in, "IdC Token 刷新成功");
     } else {
-        tracing::info!(credential_id = %id, "IdC Token 刷新成功（无过期时间）");
+        tracing::info!("IdC Token 刷新成功（无过期时间）");
     }
 
     Ok(new_credentials)
@@ -371,7 +373,7 @@ pub(crate) async fn get_usage_limits(
         USAGE_LIMITS_AMZ_USER_AGENT_PREFIX, kiro_version, machine_id
     );
 
-    let client = build_client(proxy, 60)?;
+    let client = build_client(proxy, 60, config.tls_backend)?;
 
     let response = client
         .get(&url)
@@ -611,6 +613,7 @@ impl MultiTokenManager {
         let entries: Vec<CredentialEntry> = credentials
             .into_iter()
             .map(|mut cred| {
+                cred.canonicalize_auth_method();
                 let id = cred.id.unwrap_or_else(|| {
                     let id = next_id;
                     next_id += 1;
@@ -1120,7 +1123,14 @@ impl MultiTokenManager {
         // 收集所有凭据
         let credentials: Vec<KiroCredentials> = {
             let entries = self.entries.lock();
-            entries.iter().map(|e| e.credentials.clone()).collect()
+            entries
+                .iter()
+                .map(|e| {
+                    let mut cred = e.credentials.clone();
+                    cred.canonicalize_auth_method();
+                    cred
+                })
+                .collect()
         };
 
         // 序列化为 pretty JSON
@@ -1420,7 +1430,13 @@ impl MultiTokenManager {
                     disabled: e.disabled,
                     disable_reason: e.disable_reason,
                     failure_count: e.failure_count,
-                    auth_method: e.credentials.auth_method.clone(),
+                    auth_method: e.credentials.auth_method.as_deref().map(|m| {
+                        if m.eq_ignore_ascii_case("builder-id") || m.eq_ignore_ascii_case("iam") {
+                            "idc".to_string()
+                        } else {
+                            m.to_string()
+                        }
+                    }),
                     has_profile_arn: e.credentials.profile_arn.is_some(),
                     expires_at: e.credentials.expires_at.clone(),
                 })
@@ -1581,9 +1597,17 @@ impl MultiTokenManager {
         // 4. 设置 ID 并保留用户输入的元数据
         validated_cred.id = Some(new_id);
         validated_cred.priority = new_cred.priority;
-        validated_cred.auth_method = new_cred.auth_method;
+        validated_cred.auth_method = new_cred.auth_method.map(|m| {
+            if m.eq_ignore_ascii_case("builder-id") || m.eq_ignore_ascii_case("iam") {
+                "idc".to_string()
+            } else {
+                m
+            }
+        });
         validated_cred.client_id = new_cred.client_id;
         validated_cred.client_secret = new_cred.client_secret;
+        validated_cred.region = new_cred.region;
+        validated_cred.machine_id = new_cred.machine_id;
 
         {
             let mut entries = self.entries.lock();

@@ -9,10 +9,10 @@ use crate::kiro::model::requests::conversation::{
     HistoryUserMessage, KiroImage, Message, UserInputMessage, UserInputMessageContext, UserMessage,
 };
 use crate::kiro::model::requests::tool::{
-    InputSchema, Tool, ToolResult, ToolSpecification, ToolUseEntry,
+    InputSchema, Tool as KiroTool, ToolResult, ToolSpecification, ToolUseEntry,
 };
 
-use super::types::{ContentBlock, MessagesRequest, Thinking};
+use super::types::{ContentBlock, MessagesRequest, Thinking, Tool as AnthropicTool};
 
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
 ///
@@ -101,8 +101,8 @@ fn collect_history_tool_names(history: &[Message]) -> Vec<String> {
 
 /// 为历史中使用但不在 tools 列表中的工具创建占位符定义
 /// Kiro API 要求：历史消息中引用的工具必须在 currentMessage.tools 中有定义
-fn create_placeholder_tool(name: &str) -> Tool {
-    Tool {
+fn create_placeholder_tool(name: &str) -> KiroTool {
+    KiroTool {
         tool_specification: ToolSpecification {
             name: name.to_string(),
             description: "Tool used in conversation history".to_string(),
@@ -379,71 +379,32 @@ fn validate_tool_pairing(history: &[Message], tool_results: &[ToolResult]) -> Ve
 }
 
 /// 转换工具定义
-fn convert_tools(tools: &Option<Vec<serde_json::Value>>) -> Vec<Tool> {
+fn convert_tools(tools: &Option<Vec<AnthropicTool>>) -> Vec<KiroTool> {
     let Some(tools) = tools else {
         return Vec::new();
     };
 
     tools
         .iter()
-        .filter_map(|t| {
-            // 获取工具名称，如果没有 name 字段则跳过
-            let name = match t.get("name").and_then(|n| n.as_str()) {
-                Some(n) => n,
-                None => {
-                    tracing::debug!("跳过工具：缺少 name 字段");
-                    return None;
-                }
-            };
-
-            // 跳过不支持的工具
-            if is_unsupported_tool(name) {
-                tracing::debug!("跳过不支持的工具: {}", name);
-                return None;
-            }
-
-            // 获取 input_schema，如果没有则跳过（WebSearchTool 等特殊工具没有 input_schema）
-            let input_schema = match t.get("input_schema") {
-                Some(schema) => schema,
-                None => {
-                    tracing::debug!(
-                        "跳过工具 '{}': 缺少 input_schema（可能是特殊工具如 WebSearchTool）",
-                        name
-                    );
-                    return None;
-                }
-            };
-
-            // 获取描述（可选）
-            let description = t
-                .get("description")
-                .and_then(|d| d.as_str())
-                .unwrap_or_default()
-                .to_string();
-
+        .map(|t| {
+            let description = t.description.clone();
             // 限制描述长度为 10000 字符（安全截断 UTF-8，单次遍历）
             let description = match description.char_indices().nth(10000) {
                 Some((idx, _)) => description[..idx].to_string(),
                 None => description,
             };
 
-            Some(Tool {
+            KiroTool {
                 tool_specification: ToolSpecification {
-                    name: name.to_string(),
+                    name: t.name.clone(),
                     description,
-                    input_schema: InputSchema::from_json(input_schema.clone()),
+                    input_schema: InputSchema::from_json(serde_json::json!(t.input_schema)),
                 },
-            })
+            }
         })
         .collect()
 }
 
-/// 检查是否为不支持的工具
-///
-/// 当前不过滤任何工具（upstream 已支持 web_search）
-fn is_unsupported_tool(_name: &str) -> bool {
-    false
-}
 
 /// 生成thinking标签前缀
 fn generate_thinking_prefix(thinking: &Option<Thinking>) -> Option<String> {
@@ -622,13 +583,6 @@ fn convert_assistant_message(
                             }
                         }
                         "tool_use" => {
-                            // 过滤不支持的工具
-                            if let Some(ref name) = block.name
-                                && is_unsupported_tool(name)
-                            {
-                                continue;
-                            }
-
                             if let (Some(id), Some(name)) = (block.id, block.name) {
                                 let input = block.input.unwrap_or(serde_json::json!({}));
                                 tool_uses.push(ToolUseEntry::new(id, name).with_input(input));
@@ -726,88 +680,6 @@ mod tests {
             metadata: None,
         };
         assert_eq!(determine_chat_trigger_type(&req), "MANUAL");
-    }
-
-    #[test]
-    fn test_is_unsupported_tool() {
-        // upstream 已支持 web_search，不再过滤任何工具
-        assert!(!is_unsupported_tool("web_search"));
-        assert!(!is_unsupported_tool("websearch"));
-        assert!(!is_unsupported_tool("WebSearch"));
-        assert!(!is_unsupported_tool("read_file"));
-    }
-
-    #[test]
-    fn test_convert_tools_skips_missing_name() {
-        // 缺少 name 字段的工具应被跳过
-        let tools = Some(vec![
-            serde_json::json!({
-                "description": "No name tool",
-                "input_schema": {"type": "object"}
-            }),
-            serde_json::json!({
-                "name": "valid_tool",
-                "input_schema": {"type": "object"}
-            }),
-        ]);
-
-        let result = convert_tools(&tools);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].tool_specification.name, "valid_tool");
-    }
-
-    #[test]
-    fn test_convert_tools_skips_missing_input_schema() {
-        // 缺少 input_schema 的工具应被跳过（如 WebSearchTool）
-        let tools = Some(vec![
-            serde_json::json!({
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "max_uses": 5
-            }),
-            serde_json::json!({
-                "name": "valid_tool",
-                "description": "A valid tool",
-                "input_schema": {"type": "object"}
-            }),
-        ]);
-
-        let result = convert_tools(&tools);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].tool_specification.name, "valid_tool");
-    }
-
-    #[test]
-    fn test_convert_tools_includes_all() {
-        // upstream 已支持 web_search，不再过滤任何工具
-        let tools = Some(vec![
-            serde_json::json!({
-                "name": "web_search",
-                "input_schema": {"type": "object"}
-            }),
-            serde_json::json!({
-                "name": "WebSearch",
-                "input_schema": {"type": "object"}
-            }),
-            serde_json::json!({
-                "name": "read_file",
-                "input_schema": {"type": "object"}
-            }),
-        ]);
-
-        let result = convert_tools(&tools);
-        assert_eq!(result.len(), 3);
-    }
-
-    #[test]
-    fn test_convert_tools_empty() {
-        let tools: Option<Vec<serde_json::Value>> = None;
-        let result = convert_tools(&tools);
-        assert!(result.is_empty());
-
-        let tools = Some(vec![]);
-        let result = convert_tools(&tools);
-        assert!(result.is_empty());
     }
 
     #[test]

@@ -187,7 +187,7 @@ where
 
     let body = serde_cbor::to_vec(req).context("CBOR 编码失败")?;
 
-    let client = build_client(proxy, 60)?;
+    let client = build_client(proxy, 60, crate::model::config::TlsBackend::NativeTls)?;
 
     let resp = client
         .post(&url)

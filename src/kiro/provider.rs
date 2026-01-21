@@ -39,7 +39,7 @@ impl KiroProvider {
 
     /// 创建带代理配置的 KiroProvider 实例
     pub fn with_proxy(token_manager: Arc<MultiTokenManager>, proxy: Option<ProxyConfig>) -> Self {
-        let client = build_client(proxy.as_ref(), 720) // 12 分钟超时
+        let client = build_client(proxy.as_ref(), 720, token_manager.config().tls_backend)
             .expect("创建 HTTP 客户端失败");
 
         Self {
@@ -179,6 +179,7 @@ impl KiroProvider {
         );
         headers.insert("user-agent", HeaderValue::from_str(&user_agent)?);
         headers.insert("host", HeaderValue::from_str(&self.base_domain())?);
+
         headers.insert(
             "amz-sdk-invocation-id",
             HeaderValue::from_str(&Uuid::new_v4().to_string())?,
@@ -533,20 +534,6 @@ impl KiroProvider {
                     status,
                     body
                 );
-
-                // 检测 MODEL_TEMPORARILY_UNAVAILABLE 并触发熔断机制
-                if Self::is_model_temporarily_unavailable(&body)
-                    && self.token_manager.report_model_unavailable()
-                {
-                    // 熔断已触发，所有凭据已禁用，立即返回错误
-                    anyhow::bail!(
-                        "{} API 请求失败（模型暂时不可用，已触发熔断）: {} {}",
-                        api_type,
-                        status,
-                        body
-                    );
-                }
-
                 last_error = Some(anyhow::anyhow!(
                     "{} API 请求失败: {} {}",
                     api_type,
