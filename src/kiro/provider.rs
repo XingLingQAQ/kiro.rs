@@ -325,6 +325,14 @@ impl KiroProvider {
 
             // 400 Bad Request
             if status.as_u16() == 400 {
+                // 记录详细的请求信息以便调试
+                tracing::error!(
+                    status = %status,
+                    response_body = %body,
+                    request_body_len = request_body.len(),
+                    request_body_preview = %Self::truncate_for_log(request_body, 2000),
+                    "MCP 400 Bad Request - 请求格式错误"
+                );
                 anyhow::bail!("MCP 请求失败: {} {}", status, body);
             }
 
@@ -492,6 +500,14 @@ impl KiroProvider {
 
             // 400 Bad Request - 请求问题，重试/切换凭据无意义
             if status.as_u16() == 400 {
+                // 记录详细的请求信息以便调试
+                tracing::error!(
+                    status = %status,
+                    response_body = %body,
+                    request_body_len = request_body.len(),
+                    request_body_preview = %Self::truncate_for_log(request_body, 2000),
+                    "400 Bad Request - 请求格式错误"
+                );
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
 
@@ -636,6 +652,15 @@ impl KiroProvider {
             .pointer("/error/reason")
             .and_then(|v| v.as_str())
             .is_some_and(|v| v == "MODEL_TEMPORARILY_UNAVAILABLE")
+    }
+
+    /// 截断字符串用于日志输出，避免日志过长
+    fn truncate_for_log(s: &str, max_len: usize) -> String {
+        if s.len() <= max_len {
+            s.to_string()
+        } else {
+            format!("{}...[truncated, total {} bytes]", &s[..max_len], s.len())
+        }
     }
 }
 
