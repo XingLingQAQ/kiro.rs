@@ -243,3 +243,49 @@ export interface CredentialAccountInfoResponse {
   id: number
   account: AccountAggregateInfo
 }
+
+// ============ 批量导入 token.json ============
+
+// 官方 token.json 格式（用于解析导入）
+export interface TokenJsonItem {
+  provider?: string
+  refreshToken?: string
+  clientId?: string
+  clientSecret?: string
+  authMethod?: string
+  priority?: number
+  region?: string
+  machineId?: string
+}
+
+// 批量导入请求
+export interface ImportTokenJsonRequest {
+  dryRun?: boolean
+  items: TokenJsonItem | TokenJsonItem[]
+}
+
+// 导入动作
+export type ImportAction = 'added' | 'skipped' | 'invalid'
+
+// 单项导入结果
+export interface ImportItemResult {
+  index: number
+  fingerprint: string
+  action: ImportAction
+  reason?: string
+  credentialId?: number
+}
+
+// 导入汇总
+export interface ImportSummary {
+  parsed: number
+  added: number
+  skipped: number
+  invalid: number
+}
+
+// 批量导入响应
+export interface ImportTokenJsonResponse {
+  summary: ImportSummary
+  items: ImportItemResult[]
+}

@@ -8,7 +8,9 @@ use crate::kiro::token_manager::MultiTokenManager;
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CachedBalanceItem,
-    CachedBalancesResponse, CredentialStatusItem, CredentialsStatusResponse,
+    CachedBalancesResponse, CredentialStatusItem, CredentialsStatusResponse, ImportAction,
+    ImportItemResult, ImportSummary, ImportTokenJsonRequest, ImportTokenJsonResponse,
+    TokenJsonItem,
 };
 
 /// Admin 服务
@@ -238,5 +240,179 @@ impl AdminService {
         } else {
             AdminServiceError::InternalError(msg)
         }
+    }
+
+    /// 批量导入 token.json
+    ///
+    /// 解析官方 token.json 格式，按 provider 字段自动映射 authMethod：
+    /// - BuilderId/builder-id → builder-id
+    /// - IdC/idc → idc
+    /// - Social/social → social
+    pub async fn import_token_json(&self, req: ImportTokenJsonRequest) -> ImportTokenJsonResponse {
+        let items = req.items.into_vec();
+        let dry_run = req.dry_run;
+
+        let mut results = Vec::with_capacity(items.len());
+        let mut added = 0usize;
+        let mut skipped = 0usize;
+        let mut invalid = 0usize;
+
+        for (index, item) in items.into_iter().enumerate() {
+            let result = self.process_token_json_item(index, item, dry_run).await;
+            match result.action {
+                ImportAction::Added => added += 1,
+                ImportAction::Skipped => skipped += 1,
+                ImportAction::Invalid => invalid += 1,
+            }
+            results.push(result);
+        }
+
+        ImportTokenJsonResponse {
+            summary: ImportSummary {
+                parsed: results.len(),
+                added,
+                skipped,
+                invalid,
+            },
+            items: results,
+        }
+    }
+
+    /// 处理单个 token.json 项
+    async fn process_token_json_item(
+        &self,
+        index: usize,
+        item: TokenJsonItem,
+        dry_run: bool,
+    ) -> ImportItemResult {
+        // 生成指纹（用于识别和去重）
+        let fingerprint = Self::generate_fingerprint(&item);
+
+        // 验证必填字段
+        let refresh_token = match &item.refresh_token {
+            Some(rt) if !rt.is_empty() => rt.clone(),
+            _ => {
+                return ImportItemResult {
+                    index,
+                    fingerprint,
+                    action: ImportAction::Invalid,
+                    reason: Some("缺少 refreshToken".to_string()),
+                    credential_id: None,
+                };
+            }
+        };
+
+        // 映射 authMethod
+        let auth_method = Self::map_auth_method(&item);
+
+        // IdC/builder-id 需要 clientId 和 clientSecret
+        if (auth_method == "idc" || auth_method == "builder-id")
+            && (item.client_id.is_none() || item.client_secret.is_none())
+        {
+            return ImportItemResult {
+                index,
+                fingerprint,
+                action: ImportAction::Invalid,
+                reason: Some(format!("{} 认证需要 clientId 和 clientSecret", auth_method)),
+                credential_id: None,
+            };
+        }
+
+        // 检查是否已存在（通过 refreshToken 前缀匹配）
+        if self.token_manager.has_refresh_token_prefix(&refresh_token) {
+            return ImportItemResult {
+                index,
+                fingerprint,
+                action: ImportAction::Skipped,
+                reason: Some("凭据已存在".to_string()),
+                credential_id: None,
+            };
+        }
+
+        // dry-run 模式只返回预览
+        if dry_run {
+            return ImportItemResult {
+                index,
+                fingerprint,
+                action: ImportAction::Added,
+                reason: Some("预览模式".to_string()),
+                credential_id: None,
+            };
+        }
+
+        // 实际添加凭据
+        let new_cred = KiroCredentials {
+            id: None,
+            access_token: None,
+            refresh_token: Some(refresh_token),
+            profile_arn: None,
+            expires_at: None,
+            auth_method: Some(auth_method),
+            client_id: item.client_id,
+            client_secret: item.client_secret,
+            priority: item.priority,
+            region: item.region,
+            machine_id: item.machine_id,
+        };
+
+        match self.token_manager.add_credential(new_cred).await {
+            Ok(credential_id) => ImportItemResult {
+                index,
+                fingerprint,
+                action: ImportAction::Added,
+                reason: None,
+                credential_id: Some(credential_id),
+            },
+            Err(e) => ImportItemResult {
+                index,
+                fingerprint,
+                action: ImportAction::Invalid,
+                reason: Some(e.to_string()),
+                credential_id: None,
+            },
+        }
+    }
+
+    /// 生成凭据指纹（用于识别）
+    fn generate_fingerprint(item: &TokenJsonItem) -> String {
+        // 使用 refreshToken 前 16 字符作为指纹
+        // 使用 floor_char_boundary 安全截断，避免在多字节字符中间切割导致 panic
+        item.refresh_token
+            .as_ref()
+            .map(|rt| {
+                if rt.len() >= 16 {
+                    let end = rt.floor_char_boundary(16);
+                    format!("{}...", &rt[..end])
+                } else {
+                    rt.clone()
+                }
+            })
+            .unwrap_or_else(|| "(empty)".to_string())
+    }
+
+    /// 映射 provider/authMethod 到标准 authMethod
+    fn map_auth_method(item: &TokenJsonItem) -> String {
+        // 优先使用 authMethod 字段
+        if let Some(auth) = &item.auth_method {
+            let auth_lower = auth.to_lowercase();
+            return match auth_lower.as_str() {
+                "idc" | "builder-id" | "builderid" => "idc".to_string(),
+                "social" => "social".to_string(),
+                _ => auth_lower,
+            };
+        }
+
+        // 回退到 provider 字段
+        if let Some(provider) = &item.provider {
+            let provider_lower = provider.to_lowercase();
+            return match provider_lower.as_str() {
+                "builderid" | "builder-id" | "idc" => "idc".to_string(),
+                "social" => "social".to_string(),
+                _ => "social".to_string(), // 默认 social
+            };
+        }
+
+        // 默认 social
+        "social".to_string()
     }
 }

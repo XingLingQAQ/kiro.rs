@@ -12,8 +12,9 @@ import {
   getCredentialStats,
   resetCredentialStats,
   resetAllStats,
+  importTokenJson,
 } from '@/api/credentials'
-import type { AddCredentialRequest } from '@/types/api'
+import type { AddCredentialRequest, ImportTokenJsonRequest } from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials() {
@@ -144,6 +145,18 @@ export function useResetAllStats() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
       queryClient.invalidateQueries({ queryKey: ['credential-stats'] })
+    },
+  })
+}
+
+// 批量导入 token.json
+export function useImportTokenJson() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (req: ImportTokenJsonRequest) => importTokenJson(req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
     },
   })
 }

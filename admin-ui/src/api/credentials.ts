@@ -11,6 +11,8 @@ import type {
   AddCredentialResponse,
   CredentialStatsResponse,
   CredentialAccountInfoResponse,
+  ImportTokenJsonRequest,
+  ImportTokenJsonResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -117,5 +119,16 @@ export async function resetCredentialStats(id: number): Promise<SuccessResponse>
 // 清空全部统计
 export async function resetAllStats(): Promise<SuccessResponse> {
   const { data } = await api.post<SuccessResponse>('/stats/reset')
+  return data
+}
+
+// 批量导入 token.json
+export async function importTokenJson(
+  req: ImportTokenJsonRequest
+): Promise<ImportTokenJsonResponse> {
+  const { data } = await api.post<ImportTokenJsonResponse>(
+    '/credentials/import-token-json',
+    req
+  )
   return data
 }

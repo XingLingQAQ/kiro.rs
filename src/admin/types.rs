@@ -160,6 +160,93 @@ impl SuccessResponse {
     }
 }
 
+// ============ 批量导入 token.json ============
+
+/// 官方 token.json 格式（用于解析导入）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenJsonItem {
+    pub provider: Option<String>,
+    pub refresh_token: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub auth_method: Option<String>,
+    #[serde(default)]
+    pub priority: u32,
+    pub region: Option<String>,
+    pub machine_id: Option<String>,
+}
+
+/// 批量导入请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportTokenJsonRequest {
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+    pub items: ImportItems,
+}
+
+fn default_dry_run() -> bool {
+    true
+}
+
+/// 导入项（支持单个或数组）
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ImportItems {
+    Single(TokenJsonItem),
+    Multiple(Vec<TokenJsonItem>),
+}
+
+impl ImportItems {
+    pub fn into_vec(self) -> Vec<TokenJsonItem> {
+        match self {
+            ImportItems::Single(item) => vec![item],
+            ImportItems::Multiple(items) => items,
+        }
+    }
+}
+
+/// 批量导入响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportTokenJsonResponse {
+    pub summary: ImportSummary,
+    pub items: Vec<ImportItemResult>,
+}
+
+/// 导入汇总
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSummary {
+    pub parsed: usize,
+    pub added: usize,
+    pub skipped: usize,
+    pub invalid: usize,
+}
+
+/// 单项导入结果
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportItemResult {
+    pub index: usize,
+    pub fingerprint: String,
+    pub action: ImportAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<u64>,
+}
+
+/// 导入动作
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportAction {
+    Added,
+    Skipped,
+    Invalid,
+}
+
 /// 错误响应
 #[derive(Debug, Serialize)]
 pub struct AdminErrorResponse {

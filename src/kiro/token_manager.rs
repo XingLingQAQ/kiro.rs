@@ -1723,6 +1723,27 @@ impl MultiTokenManager {
         tracing::info!("已删除凭据 #{}", id);
         Ok(())
     }
+
+    /// 检查是否存在具有相同 refreshToken 前缀的凭据
+    ///
+    /// 用于批量导入时的去重检查，通过比较 refreshToken 前 32 字符判断是否重复
+    /// 使用 floor_char_boundary 安全截断，避免在多字节字符中间切割导致 panic
+    pub fn has_refresh_token_prefix(&self, refresh_token: &str) -> bool {
+        let prefix_len = refresh_token.floor_char_boundary(32);
+        let new_prefix = &refresh_token[..prefix_len];
+
+        let entries = self.entries.lock();
+        entries.iter().any(|e| {
+            e.credentials
+                .refresh_token
+                .as_ref()
+                .map(|rt| {
+                    let existing_prefix_len = rt.floor_char_boundary(32);
+                    &rt[..existing_prefix_len] == new_prefix
+                })
+                .unwrap_or(false)
+        })
+    }
 }
 
 #[cfg(test)]

@@ -8,7 +8,10 @@ use axum::{
 
 use super::{
     middleware::AdminState,
-    types::{AddCredentialRequest, SetDisabledRequest, SetPriorityRequest, SuccessResponse},
+    types::{
+        AddCredentialRequest, ImportTokenJsonRequest, SetDisabledRequest, SetPriorityRequest,
+        SuccessResponse,
+    },
 };
 
 /// GET /api/admin/credentials
@@ -107,4 +110,14 @@ pub async fn delete_credential(
         Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 已删除", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
+}
+
+/// POST /api/admin/credentials/import-token-json
+/// 批量导入 token.json
+pub async fn import_token_json(
+    State(state): State<AdminState>,
+    Json(payload): Json<ImportTokenJsonRequest>,
+) -> impl IntoResponse {
+    let response = state.service.import_token_json(payload).await;
+    Json(response)
 }
