@@ -340,16 +340,20 @@ async fn refresh_idc_token(
     }
 
     // IDC 凭据刷新不返回 profile_arn，需要通过 ListProfiles API 获取
-    if new_credentials.profile_arn.is_none() {
-        if let Some(access_token) = &new_credentials.access_token {
-            match fetch_profile_arn(access_token, proxy, config.tls_backend).await {
-                Ok(profile_arn) => {
-                    tracing::info!("成功获取 IDC 凭据的 profileArn");
-                    new_credentials.profile_arn = Some(profile_arn);
-                }
-                Err(e) => {
-                    tracing::warn!("获取 IDC 凭据的 profileArn 失败: {}", e);
-                }
+    // 同时处理 None 和空字符串的情况
+    if new_credentials
+        .profile_arn
+        .as_ref()
+        .is_none_or(|s| s.trim().is_empty())
+        && let Some(access_token) = &new_credentials.access_token
+    {
+        match fetch_profile_arn(access_token, &config.region, proxy, config.tls_backend).await {
+            Ok(profile_arn) => {
+                tracing::info!("成功获取 IDC 凭据的 profileArn");
+                new_credentials.profile_arn = Some(profile_arn);
+            }
+            Err(e) => {
+                tracing::warn!("获取 IDC 凭据的 profileArn 失败: {}", e);
             }
         }
     }
@@ -363,6 +367,7 @@ async fn refresh_idc_token(
 /// 参考 CLIProxyAPIPlus 的实现
 async fn fetch_profile_arn(
     access_token: &str,
+    region: &str,
     proxy: Option<&ProxyConfig>,
     tls_backend: crate::model::config::TlsBackend,
 ) -> anyhow::Result<String> {
@@ -375,9 +380,13 @@ async fn fetch_profile_arn(
         "origin": "AI_EDITOR"
     });
 
+    // 根据 region 构建 CodeWhisperer API 端点
+    // 注意：CodeWhisperer API 使用 codewhisperer.{region}.amazonaws.com 格式
+    let endpoint = format!("https://codewhisperer.{}.amazonaws.com", region);
+
     // 调用 ListProfiles API
     let response = client
-        .post("https://codewhisperer.us-east-1.amazonaws.com")
+        .post(&endpoint)
         .header("Content-Type", "application/x-amz-json-1.0")
         .header("x-amz-target", "AmazonCodeWhispererService.ListProfiles")
         .header("Authorization", format!("Bearer {}", access_token))
@@ -399,21 +408,19 @@ async fn fetch_profile_arn(
     let result: serde_json::Value = serde_json::from_str(&body_text)?;
 
     // 优先使用 profileArn 字段
-    if let Some(profile_arn) = result.get("profileArn").and_then(|v| v.as_str()) {
-        if !profile_arn.is_empty() {
-            return Ok(profile_arn.to_string());
-        }
+    if let Some(profile_arn) = result.get("profileArn").and_then(|v| v.as_str())
+        && !profile_arn.is_empty()
+    {
+        return Ok(profile_arn.to_string());
     }
 
     // 回退到 profiles 数组的第一个元素
-    if let Some(profiles) = result.get("profiles").and_then(|v| v.as_array()) {
-        if let Some(first_profile) = profiles.first() {
-            if let Some(arn) = first_profile.get("arn").and_then(|v| v.as_str()) {
-                if !arn.is_empty() {
-                    return Ok(arn.to_string());
-                }
-            }
-        }
+    if let Some(profiles) = result.get("profiles").and_then(|v| v.as_array())
+        && let Some(first_profile) = profiles.first()
+        && let Some(arn) = first_profile.get("arn").and_then(|v| v.as_str())
+        && !arn.is_empty()
+    {
+        return Ok(arn.to_string());
     }
 
     bail!("ListProfiles 响应中未找到 profileArn")
