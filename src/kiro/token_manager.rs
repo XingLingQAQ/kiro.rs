@@ -339,7 +339,84 @@ async fn refresh_idc_token(
         tracing::info!("IdC Token 刷新成功（无过期时间）");
     }
 
+    // IDC 凭据刷新不返回 profile_arn，需要通过 ListProfiles API 获取
+    if new_credentials.profile_arn.is_none() {
+        if let Some(access_token) = &new_credentials.access_token {
+            match fetch_profile_arn(access_token, proxy, config.tls_backend).await {
+                Ok(profile_arn) => {
+                    tracing::info!("成功获取 IDC 凭据的 profileArn");
+                    new_credentials.profile_arn = Some(profile_arn);
+                }
+                Err(e) => {
+                    tracing::warn!("获取 IDC 凭据的 profileArn 失败: {}", e);
+                }
+            }
+        }
+    }
+
     Ok(new_credentials)
+}
+
+/// 通过 ListProfiles API 获取 profileArn
+///
+/// IDC 凭据的 Token 刷新不返回 profileArn，需要通过此 API 获取
+/// 参考 CLIProxyAPIPlus 的实现
+async fn fetch_profile_arn(
+    access_token: &str,
+    proxy: Option<&ProxyConfig>,
+    tls_backend: crate::model::config::TlsBackend,
+) -> anyhow::Result<String> {
+    tracing::debug!("正在通过 ListProfiles API 获取 profileArn...");
+
+    let client = build_client(proxy, 30, tls_backend)?;
+
+    // 构建请求体
+    let payload = serde_json::json!({
+        "origin": "AI_EDITOR"
+    });
+
+    // 调用 ListProfiles API
+    let response = client
+        .post("https://codewhisperer.us-east-1.amazonaws.com")
+        .header("Content-Type", "application/x-amz-json-1.0")
+        .header("x-amz-target", "AmazonCodeWhispererService.ListProfiles")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Accept", "application/json")
+        .json(&payload)
+        .send()
+        .await?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        bail!("ListProfiles API 调用失败: {} {}", status, body_text);
+    }
+
+    let body_text = response.text().await?;
+    tracing::debug!("ListProfiles 响应: {}", body_text);
+
+    // 解析响应
+    let result: serde_json::Value = serde_json::from_str(&body_text)?;
+
+    // 优先使用 profileArn 字段
+    if let Some(profile_arn) = result.get("profileArn").and_then(|v| v.as_str()) {
+        if !profile_arn.is_empty() {
+            return Ok(profile_arn.to_string());
+        }
+    }
+
+    // 回退到 profiles 数组的第一个元素
+    if let Some(profiles) = result.get("profiles").and_then(|v| v.as_array()) {
+        if let Some(first_profile) = profiles.first() {
+            if let Some(arn) = first_profile.get("arn").and_then(|v| v.as_str()) {
+                if !arn.is_empty() {
+                    return Ok(arn.to_string());
+                }
+            }
+        }
+    }
+
+    bail!("ListProfiles 响应中未找到 profileArn")
 }
 
 /// getUsageLimits API 所需的 x-amz-user-agent header 前缀
