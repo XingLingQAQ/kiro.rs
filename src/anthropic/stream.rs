@@ -311,7 +311,8 @@ impl SseStateManager {
         // 检查块是否已存在
         if let Some(block) = self.active_blocks.get_mut(&index) {
             if block.started {
-                tracing::debug!("块 {} 已启动，跳过重复的 content_block_start", index);
+                // 正常流式响应中会频繁触发，注释掉避免日志噪音
+                // tracing::debug!("块 {} 已启动，跳过重复的 content_block_start", index);
                 return events;
             }
             block.started = true;
