@@ -231,10 +231,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
 
     // 12. 构建当前消息
     // 保留文本内容，即使有工具结果也不丢弃用户文本
-    let content = non_empty_content_or_space(
-        text_content,
-        !images.is_empty() || has_tool_results,
-    );
+    let content = non_empty_content_or_space(text_content, !images.is_empty() || has_tool_results);
 
     let mut user_input = UserInputMessage::new(content, &model_id)
         .with_context(context)

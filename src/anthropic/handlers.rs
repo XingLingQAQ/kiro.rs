@@ -455,8 +455,12 @@ async fn handle_non_stream_request(
 
                             // 如果是完整的工具调用，添加到列表
                             if tool_use.stop {
-                                let input: serde_json::Value = serde_json::from_str(buffer)
-                                    .unwrap_or_else(|e| {
+                                let input: serde_json::Value = if buffer.trim().is_empty() {
+                                    // 上游可能省略无参工具的 input 字段（或传空字符串）。
+                                    // 这里将其视为合法的空对象，避免 EOF 解析错误导致日志噪音。
+                                    serde_json::json!({})
+                                } else {
+                                    serde_json::from_str(buffer).unwrap_or_else(|e| {
                                         // 仅在显式开启敏感日志时输出完整内容
                                         #[cfg(feature = "sensitive-logs")]
                                         tracing::warn!(
@@ -473,7 +477,8 @@ async fn handle_non_stream_request(
                                             "工具输入 JSON 解析失败: {e}"
                                         );
                                         serde_json::json!({})
-                                    });
+                                    })
+                                };
 
                                 tool_uses.push(json!({
                                     "type": "tool_use",
@@ -670,7 +675,10 @@ pub async fn post_messages_cc(
     #[cfg(feature = "sensitive-logs")]
     tracing::debug!("Kiro request body: {}", request_body);
     #[cfg(not(feature = "sensitive-logs"))]
-    tracing::debug!(kiro_request_body_bytes = request_body.len(), "已构建 Kiro 请求体");
+    tracing::debug!(
+        kiro_request_body_bytes = request_body.len(),
+        "已构建 Kiro 请求体"
+    );
 
     // 估算输入 tokens
     let input_tokens = token::count_all_tokens(
