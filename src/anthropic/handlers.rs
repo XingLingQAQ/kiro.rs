@@ -457,9 +457,20 @@ async fn handle_non_stream_request(
                             if tool_use.stop {
                                 let input: serde_json::Value = serde_json::from_str(buffer)
                                     .unwrap_or_else(|e| {
+                                        // 仅在显式开启敏感日志时输出完整内容
+                                        #[cfg(feature = "sensitive-logs")]
                                         tracing::warn!(
-                                            "工具输入 JSON 解析失败: {}, tool_use_id: {}, 工具输入缓冲区: {}, 完整请求: {}",
-                                            e, tool_use.tool_use_id, buffer, request_body
+                                            tool_use_id = %tool_use.tool_use_id,
+                                            buffer = %buffer,
+                                            request_body = %request_body,
+                                            "工具输入 JSON 解析失败: {e}"
+                                        );
+                                        #[cfg(not(feature = "sensitive-logs"))]
+                                        tracing::warn!(
+                                            tool_use_id = %tool_use.tool_use_id,
+                                            buffer_len = buffer.len(),
+                                            request_body_bytes = request_body.len(),
+                                            "工具输入 JSON 解析失败: {e}"
                                         );
                                         serde_json::json!({})
                                     });

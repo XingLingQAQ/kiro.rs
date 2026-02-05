@@ -7,8 +7,9 @@
   - 当用户设置超出限制的值时自动调整为 32000
   - 记录 WARN 级别日志，包含原始值和调整后的值
   - 涉及文件：`src/anthropic/handlers.rs`
-- 工具输入 JSON 解析失败时输出完整 Kiro 请求体
-  - 注意：日志可能包含敏感信息且体积较大，仅用于排查问题
+- 工具输入 JSON 解析失败时的日志输出改为受 `sensitive-logs` feature 控制
+  - 默认仅输出 `buffer_len` 和 `request_body_bytes`（长度信息）
+  - 启用 `--features sensitive-logs` 时输出完整 `buffer` 和 `request_body`
   - 涉及文件：`src/anthropic/handlers.rs`
 - 修复 Kiro 上游请求兼容性问题
   - 空 content（仅 tool_result/image）时使用占位符避免 400
