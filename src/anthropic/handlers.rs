@@ -446,8 +446,8 @@ async fn handle_non_stream_request(
                                 let input: serde_json::Value = serde_json::from_str(buffer)
                                     .unwrap_or_else(|e| {
                                         tracing::warn!(
-                                            "工具输入 JSON 解析失败: {}, tool_use_id: {}, 原始内容: {}",
-                                            e, tool_use.tool_use_id, buffer
+                                            "工具输入 JSON 解析失败: {}, tool_use_id: {}, 工具输入缓冲区: {}, 完整请求: {}",
+                                            e, tool_use.tool_use_id, buffer, request_body
                                         );
                                         serde_json::json!({})
                                     });
