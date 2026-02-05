@@ -387,6 +387,12 @@ RUST_LOG=debug ./target/release/kiro-rs
 - **Admin UI**
   - `GET /admin` - 访问管理页面（需要在编译前构建 `admin-ui/dist`）
 
+## 💬 社区交流
+
+欢迎加入 QQ 群交流讨论：**642217364**
+
+<img src="docs/qrcode_1769645166806.png" width="300" alt="QQ群二维码">
+
 ## License
 
 MIT
