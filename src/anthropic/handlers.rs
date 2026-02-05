@@ -85,10 +85,22 @@ pub async fn get_models() -> impl IntoResponse {
 /// 创建消息（对话）
 pub async fn post_messages(
     State(state): State<AppState>,
-    JsonExtractor(payload): JsonExtractor<MessagesRequest>,
+    JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     // 提取 user_id 用于凭据亲和性
     let user_id = payload.metadata.as_ref().and_then(|m| m.user_id.as_deref());
+
+    // 限制 max_tokens 最大值为 32000（Kiro 上游限制）
+    const MAX_TOKENS_LIMIT: i32 = 32000;
+    let original_max_tokens = payload.max_tokens;
+    if payload.max_tokens > MAX_TOKENS_LIMIT {
+        payload.max_tokens = MAX_TOKENS_LIMIT;
+        tracing::warn!(
+            original_max_tokens = original_max_tokens,
+            adjusted_max_tokens = MAX_TOKENS_LIMIT,
+            "max_tokens 超出上游限制，已自动调整"
+        );
+    }
 
     tracing::info!(
         model = %payload.model,
