@@ -34,28 +34,62 @@ fn default_json_schema() -> serde_json::Value {
 }
 
 fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
-    let mut schema = match schema {
-        serde_json::Value::Object(map) => serde_json::Value::Object(map),
-        _ => return default_json_schema(),
-    };
-
-    let Some(obj) = schema.as_object_mut() else {
+    let serde_json::Value::Object(mut obj) = schema else {
         return default_json_schema();
     };
 
-    obj.entry("$schema".to_string()).or_insert_with(|| {
-        serde_json::Value::String("http://json-schema.org/draft-07/schema#".to_string())
-    });
-    obj.entry("type".to_string())
-        .or_insert_with(|| serde_json::Value::String("object".to_string()));
-    obj.entry("properties".to_string())
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    obj.entry("required".to_string())
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-    obj.entry("additionalProperties".to_string())
-        .or_insert_with(|| serde_json::Value::Bool(true));
+    // 关键点：上游会校验 JSON Schema 的字段类型（例如 required 必须是数组）。
+    // Claude Code / MCP 工具定义里偶尔会出现 `required: null` / `properties: null`，
+    // 这会导致上游返回 400 "Improperly formed request"。
 
-    schema
+    // $schema
+    let schema_uri = obj
+        .get("$schema")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("http://json-schema.org/draft-07/schema#")
+        .to_string();
+    obj.insert(
+        "$schema".to_string(),
+        serde_json::Value::String(schema_uri),
+    );
+
+    // type
+    let ty = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("object")
+        .to_string();
+    obj.insert("type".to_string(), serde_json::Value::String(ty));
+
+    // properties（必须是 object）
+    let properties = match obj.remove("properties") {
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        _ => serde_json::Value::Object(serde_json::Map::new()),
+    };
+    obj.insert("properties".to_string(), properties);
+
+    // required（必须是 string 数组）
+    let required = match obj.remove("required") {
+        Some(serde_json::Value::Array(arr)) => serde_json::Value::Array(
+            arr.into_iter()
+                .filter_map(|v| v.as_str().map(|s| serde_json::Value::String(s.to_string())))
+                .collect(),
+        ),
+        _ => serde_json::Value::Array(Vec::new()),
+    };
+    obj.insert("required".to_string(), required);
+
+    // additionalProperties（允许 bool 或 schema object；其他类型按 true 处理）
+    let additional_properties = match obj.remove("additionalProperties") {
+        Some(serde_json::Value::Bool(b)) => serde_json::Value::Bool(b),
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        _ => serde_json::Value::Bool(true),
+    };
+    obj.insert("additionalProperties".to_string(), additional_properties);
+
+    serde_json::Value::Object(obj)
 }
 
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
@@ -1555,5 +1589,48 @@ mod tests {
         } else {
             panic!("应该是 Assistant 消息");
         }
+    }
+
+    #[test]
+    fn test_normalize_json_schema_coerces_field_types() {
+        let input = serde_json::json!({
+            "$schema": null,
+            "type": null,
+            "properties": null,
+            "required": null,
+            "additionalProperties": null,
+        });
+
+        let normalized = normalize_json_schema(input);
+
+        assert_eq!(
+            normalized.get("$schema").and_then(|v| v.as_str()),
+            Some("http://json-schema.org/draft-07/schema#")
+        );
+        assert_eq!(normalized.get("type").and_then(|v| v.as_str()), Some("object"));
+        assert!(normalized.get("properties").is_some_and(|v| v.is_object()));
+        assert!(normalized.get("required").is_some_and(|v| v.is_array()));
+        assert!(
+            normalized
+                .get("additionalProperties")
+                .is_some_and(|v| v.is_boolean())
+        );
+    }
+
+    #[test]
+    fn test_normalize_json_schema_filters_required_non_strings() {
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": ["a", 1, null, {"x": 1}],
+        });
+
+        let normalized = normalize_json_schema(input);
+        let required = normalized
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("required 应该是数组");
+
+        assert_eq!(required, &vec![serde_json::Value::String("a".to_string())]);
     }
 }
