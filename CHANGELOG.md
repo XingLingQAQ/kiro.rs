@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.0.1] - 2026-02-08
 
 ### Fixed
 - **历史截断字符统计口径修正** (`src/anthropic/compressor.rs`)
