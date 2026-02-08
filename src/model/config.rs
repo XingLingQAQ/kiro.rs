@@ -159,6 +159,14 @@ fn default_4000() -> usize {
     4000
 }
 
+fn default_80_turns() -> usize {
+    80
+}
+
+fn default_400k() -> usize {
+    400_000
+}
+
 /// 输入压缩配置
 ///
 /// 控制请求体在协议转换后、发送到上游前的多层压缩策略。
@@ -190,11 +198,11 @@ pub struct CompressionConfig {
     /// 工具描述截断阈值（字符数），覆盖原 10000 硬编码，默认 4000
     #[serde(default = "default_4000")]
     pub tool_description_max_chars: usize,
-    /// 历史最大轮数（0=不限）
-    #[serde(default)]
+    /// 历史最大轮数，默认 80（0=不限）
+    #[serde(default = "default_80_turns")]
     pub max_history_turns: usize,
-    /// 历史最大字符数（0=不限）
-    #[serde(default)]
+    /// 历史最大字符数，默认 400000（0=不限）
+    #[serde(default = "default_400k")]
     pub max_history_chars: usize,
 }
 
@@ -209,8 +217,8 @@ impl Default for CompressionConfig {
             tool_result_tail_lines: default_40(),
             tool_use_input_max_chars: default_6000(),
             tool_description_max_chars: default_4000(),
-            max_history_turns: 0,
-            max_history_chars: 0,
+            max_history_turns: default_80_turns(),
+            max_history_chars: default_400k(),
         }
     }
 }
