@@ -1,5 +1,32 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **图片 Token 估算与压缩模块** (`src/image.rs`)
+  - 新增 `estimate_image_tokens()`: 从 base64 数据解析图片尺寸并估算 token 数
+  - 新增 `process_image()`: 根据配置对大图进行缩放压缩
+  - 实现 Anthropic 官方公式: `tokens = (width × height) / 750`
+  - 支持 JPEG/PNG/GIF/WebP 格式
+
+### Changed
+- **Token 计算支持图片** (`src/token.rs`)
+  - `count_all_tokens_local()` 现在处理 `type: "image"` 的 ContentBlock
+  - 调用 `estimate_image_tokens()` 计算图片 token，解决之前图片 token 被计为 0 的问题
+- **协议转换支持图片压缩** (`src/anthropic/converter.rs`)
+  - `process_message_content()` 新增图片压缩处理，根据配置自动缩放超限图片
+  - 新增 `count_images_in_request()` 统计请求中图片总数，用于判断多图模式
+  - 缩放后记录日志: `图片已缩放: (原始尺寸) -> (缩放后尺寸), tokens: xxx`
+- **压缩配置新增图片参数** (`src/model/config.rs`)
+  - `image_max_long_edge`: 长边最大像素，默认 1568（Anthropic 推荐值）
+  - `image_max_pixels_single`: 单张图片最大总像素，默认 1,150,000（约 1600 tokens）
+  - `image_max_pixels_multi`: 多图模式下单张最大像素，默认 4,000,000（2000×2000）
+  - `image_multi_threshold`: 触发多图限制的图片数量阈值，默认 20
+
+### Dependencies
+- 新增 `image` crate (0.25): 图片处理（支持 JPEG/PNG/GIF/WebP）
+- 新增 `base64` crate (0.22): Base64 编解码
+
 ## [v1.0.6] - 2026-02-10
 
 ### Changed
