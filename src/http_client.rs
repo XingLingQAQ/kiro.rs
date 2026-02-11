@@ -41,7 +41,6 @@ impl ProxyConfig {
 /// # Arguments
 /// * `proxy` - 可选的代理配置
 /// * `timeout_secs` - 超时时间（秒）
-/// * `tls_backend` - TLS 后端选择
 ///
 /// # Returns
 /// 配置好的 reqwest::Client
@@ -50,23 +49,7 @@ pub fn build_client(
     timeout_secs: u64,
     tls_backend: TlsBackend,
 ) -> anyhow::Result<Client> {
-    let mut builder = Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        // TCP keepalive 配置，防止长上下文场景下连接被中间设备（NAT/防火墙）静默关闭
-        .tcp_keepalive(Duration::from_secs(15))
-        // 连接池空闲超时
-        .pool_idle_timeout(Duration::from_secs(90));
-
-    // 仅支持显式代理配置（config.proxy_url），避免隐式读取系统代理带来不可控行为。
-    // 在 macOS 上，reqwest 的系统代理探测依赖 SystemConfiguration，某些环境下可能触发 panic。
-    builder = builder.no_proxy();
-
-    // tcp_user_timeout 仅在 Linux/Android/Fuchsia 上可用
-    // 控制发送数据后等待 ACK 的最大时间，超时后强制关闭连接
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "fuchsia"))]
-    {
-        builder = builder.tcp_user_timeout(Duration::from_secs(60));
-    }
+    let mut builder = Client::builder().timeout(Duration::from_secs(timeout_secs));
 
     if tls_backend == TlsBackend::Rustls {
         builder = builder.use_rustls_tls();

@@ -86,20 +86,17 @@ pub fn count_tokens(text: &str) -> u64 {
 
     let tokens = char_units / 4.0;
 
-    let acc_token = if tokens < 100.0 {
-        tokens * 1.5
+    if tokens < 100.0 {
+        (tokens * 1.5) as u64
     } else if tokens < 200.0 {
-        tokens * 1.3
+        (tokens * 1.3) as u64
     } else if tokens < 300.0 {
-        tokens * 1.25
+        (tokens * 1.25) as u64
     } else if tokens < 800.0 {
-        tokens * 1.2
+        (tokens * 1.2) as u64
     } else {
-        tokens * 1.0
-    } as u64;
-
-    // println!("tokens: {}, acc_tokens: {}", tokens, acc_token);
-    acc_token
+        tokens as u64
+    }
 }
 
 /// 估算请求的输入 tokens
@@ -112,23 +109,23 @@ pub(crate) fn count_all_tokens(
     tools: Option<Vec<Tool>>,
 ) -> u64 {
     // 检查是否配置了远程 API
-    if let Some(config) = get_config() {
-        if let Some(api_url) = &config.api_url {
-            // 尝试调用远程 API
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(call_remote_count_tokens(
-                    api_url, config, model, &system, &messages, &tools,
-                ))
-            });
+    if let Some(config) = get_config()
+        && config.api_url.is_some()
+    {
+        // 尝试调用远程 API
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(call_remote_count_tokens(
+                config, model, &system, &messages, &tools,
+            ))
+        });
 
-            match result {
-                Ok(tokens) => {
-                    tracing::debug!("远程 count_tokens API 返回: {}", tokens);
-                    return tokens;
-                }
-                Err(e) => {
-                    tracing::warn!("远程 count_tokens API 调用失败，回退到本地计算: {}", e);
-                }
+        match result {
+            Ok(tokens) => {
+                tracing::debug!("远程 count_tokens API 返回: {}", tokens);
+                return tokens;
+            }
+            Err(e) => {
+                tracing::warn!("远程 count_tokens API 调用失败，回退到本地计算: {}", e);
             }
         }
     }
@@ -139,19 +136,19 @@ pub(crate) fn count_all_tokens(
 
 /// 调用远程 count_tokens API
 async fn call_remote_count_tokens(
-    api_url: &str,
     config: &CountTokensConfig,
     model: String,
     system: &Option<Vec<SystemMessage>>,
-    messages: &Vec<Message>,
+    messages: &[Message],
     tools: &Option<Vec<Tool>>,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let api_url = config.api_url.as_ref().unwrap();
     let client = build_client(config.proxy.as_ref(), 300, config.tls_backend)?;
 
     // 构建请求体
     let request = CountTokensRequest {
-        model: model, // 模型名称用于 token 计算
-        messages: messages.clone(),
+        model,
+        messages: messages.to_vec(),
         system: system.clone(),
         tools: tools.clone(),
     };

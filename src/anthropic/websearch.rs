@@ -44,7 +44,9 @@ pub struct McpArguments {
 #[derive(Debug, Deserialize)]
 pub struct McpResponse {
     pub error: Option<McpError>,
+    #[allow(dead_code)]
     pub id: String,
+    #[allow(dead_code)]
     pub jsonrpc: String,
     pub result: Option<McpResult>,
 }
@@ -61,6 +63,7 @@ pub struct McpError {
 pub struct McpResult {
     pub content: Vec<McpContent>,
     #[serde(rename = "isError")]
+    #[allow(dead_code)]
     pub is_error: bool,
 }
 
@@ -74,6 +77,7 @@ pub struct McpContent {
 
 /// WebSearch 搜索结果
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct WebSearchResults {
     pub results: Vec<WebSearchResult>,
     #[serde(rename = "totalResults")]
@@ -84,6 +88,7 @@ pub struct WebSearchResults {
 
 /// 单个搜索结果
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct WebSearchResult {
     pub title: String,
     pub url: String,
@@ -132,11 +137,10 @@ pub fn extract_search_query(req: &MessagesRequest) -> Option<String> {
 
     // 去除前缀 "Perform a web search for the query: "
     const PREFIX: &str = "Perform a web search for the query: ";
-    let query = if text.starts_with(PREFIX) {
-        text[PREFIX.len()..].to_string()
-    } else {
-        text
-    };
+    let query = text
+        .strip_prefix(PREFIX)
+        .map(|s| s.to_string())
+        .unwrap_or(text);
 
     if query.is_empty() { None } else { Some(query) }
 }
@@ -179,7 +183,7 @@ pub fn create_mcp_request(query: &str) -> (String, McpRequest) {
     // tool_use_id 使用相同格式
     let tool_use_id = format!(
         "srvtoolu_{}",
-        Uuid::new_v4().to_string().replace('-', "")[..32].to_string()
+        &Uuid::new_v4().to_string().replace('-', "")[..32]
     );
 
     let request = McpRequest {
@@ -236,10 +240,7 @@ fn generate_websearch_events(
     input_tokens: i32,
 ) -> Vec<SseEvent> {
     let mut events = Vec::new();
-    let message_id = format!(
-        "msg_{}",
-        Uuid::new_v4().to_string().replace('-', "")[..24].to_string()
-    );
+    let message_id = format!("msg_{}", &Uuid::new_v4().to_string().replace('-', "")[..24]);
 
     // 1. message_start
     events.push(SseEvent::new(

@@ -95,8 +95,7 @@ pub fn process_image(
 
     // 仅在需要缩放时才全量解码图片
     let (output_data, final_size) = if needs_resize {
-        let img =
-            image::load_from_memory(&bytes).map_err(|e| format!("图片加载失败: {}", e))?;
+        let img = image::load_from_memory(&bytes).map_err(|e| format!("图片加载失败: {}", e))?;
         let resized = img.resize(target_w, target_h, image::imageops::FilterType::Lanczos3);
         let size = (resized.width(), resized.height());
         (encode_image(&resized, format)?, size)

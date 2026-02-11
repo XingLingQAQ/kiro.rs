@@ -1,5 +1,50 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **批量导入 token.json** (`src/admin/service.rs`, `src/admin/types.rs`)
+  - 新增 `import_token_json` 接口，支持批量导入官方 token.json 格式凭据
+  - 自动映射 provider/authMethod 字段，支持 dry-run 预览模式
+  - 去重检测：通过 refreshToken 前缀匹配避免重复导入
+
+- **缓存余额查询接口** (`src/admin/handlers.rs`, `src/admin/router.rs`)
+  - 新增 `GET /admin/credentials/balances/cached` 端点
+  - 返回所有凭据的缓存余额信息（含 TTL 和缓存时间）
+
+### Changed
+- **用户亲和性支持** (`src/kiro/token_manager.rs`, `src/kiro/provider.rs`)
+  - 新增 `UserAffinityManager`：用户与凭据绑定，保持会话连续性
+  - `acquire_context_for_user` 方法支持按 user_id 获取绑定凭据
+  - 亲和性过期时间可配置，默认 30 分钟
+
+- **余额缓存动态 TTL** (`src/kiro/token_manager.rs`)
+  - 基于使用频率动态调整缓存 TTL（高频用户更短 TTL）
+  - 新增 `update_balance_cache`、`get_all_cached_balances` 方法
+  - 缓存持久化到 `kiro_balance_cache.json`
+
+- **请求压缩管道** (`src/anthropic/converter.rs`, `src/anthropic/middleware.rs`)
+  - `AppState` 新增 `compression_config` 字段
+  - `convert_request` 支持 `CompressionConfig` 参数
+  - 图片压缩、空白压缩、上下文截断等功能集成
+
+- **凭据级代理配置** (`src/kiro/provider.rs`)
+  - KiroProvider 支持按凭据动态选择代理
+  - 新增 `get_client_for_credential` 方法，缓存凭据级 client
+  - API 请求和 MCP 请求均使用凭据的 `effective_proxy()`
+
+- **API Region 分离** (`src/kiro/provider.rs`)
+  - `base_url`、`mcp_url`、`base_domain` 使用 `effective_api_region()`
+  - 支持 Token 刷新和 API 调用使用不同 region
+
+- **handlers 传递 user_id** (`src/anthropic/handlers.rs`)
+  - 从请求 metadata 提取 user_id 并传递给 provider
+  - 支持用户亲和性功能
+
+### Fixed
+- **修复 mask_user_id UTF-8 panic** (`src/anthropic/handlers.rs`)
+  - 使用 `chars()` 按字符而非字节切片，避免多字节字符导致 panic
+
 ## [v1.0.7] - 2026-02-10
 
 ### Added

@@ -189,11 +189,13 @@ impl CredentialsConfig {
     }
 }
 
+#[allow(dead_code)]
 impl KiroCredentials {
     /// 特殊值：显式不使用代理
     pub const PROXY_DIRECT: &'static str = "direct";
 
     /// 获取默认凭证文件路径
+    #[allow(dead_code)]
     pub fn default_credentials_path() -> &'static str {
         "credentials.json"
     }
@@ -286,7 +288,6 @@ impl KiroCredentials {
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::model::config::Config;

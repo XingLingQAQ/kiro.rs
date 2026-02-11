@@ -302,12 +302,14 @@ impl Config {
 
     /// 获取有效的 Auth Region（用于 Token 刷新）
     /// 优先使用 auth_region，未配置时回退到 region
+    #[allow(dead_code)]
     pub fn effective_auth_region(&self) -> &str {
         self.auth_region.as_deref().unwrap_or(&self.region)
     }
 
     /// 获取有效的 API Region（用于 API 请求）
     /// 优先使用 api_region，未配置时回退到 region
+    #[allow(dead_code)]
     pub fn effective_api_region(&self) -> &str {
         self.api_region.as_deref().unwrap_or(&self.region)
     }
