@@ -115,6 +115,7 @@ pub struct Metadata {
 #[derive(Debug, Deserialize)]
 pub struct MessagesRequest {
     pub model: String,
+    /// 为 Anthropic API 兼容保留，实际不透传给 Kiro 上游
     pub max_tokens: i32,
     pub messages: Vec<Message>,
     #[serde(default)]

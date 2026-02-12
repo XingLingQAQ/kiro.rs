@@ -2,6 +2,10 @@
 
 ## [v1.0.9] - 2026-02-12
 
+### Changed
+- **移除无意义的 max_tokens 调整逻辑** (`src/anthropic/handlers.rs`)
+  - 删除 max_tokens 超限警告日志和调整逻辑，因为该值实际不传递给 Kiro 上游
+
 ### Fixed
 - **修复 upstream 合并丢失的功能** (`src/anthropic/stream.rs`)
   - 恢复 `stop_reason` 优先级逻辑：高优先级原因可覆盖低优先级（model_context_window_exceeded > max_tokens > tool_use > end_turn）

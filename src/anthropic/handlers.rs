@@ -196,18 +196,6 @@ pub async fn post_messages(
     // 提取 user_id 用于凭据亲和性
     let user_id = payload.metadata.as_ref().and_then(|m| m.user_id.as_deref());
 
-    // 限制 max_tokens 最大值为 32000（Kiro 上游限制）
-    const MAX_TOKENS_LIMIT: i32 = 32000;
-    let original_max_tokens = payload.max_tokens;
-    if payload.max_tokens > MAX_TOKENS_LIMIT {
-        payload.max_tokens = MAX_TOKENS_LIMIT;
-        tracing::warn!(
-            original_max_tokens = original_max_tokens,
-            adjusted_max_tokens = MAX_TOKENS_LIMIT,
-            "max_tokens 超出上游限制，已自动调整"
-        );
-    }
-
     // 估算压缩前 input tokens（需在 convert_request 之前，因为后者会消费压缩）
     let estimated_input_tokens = token::count_all_tokens(
         payload.model.clone(),
