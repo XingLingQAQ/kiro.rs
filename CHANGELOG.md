@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.0.9] - 2026-02-12
 
 ### Fixed
 - **修复 upstream 合并丢失的功能** (`src/anthropic/stream.rs`)
