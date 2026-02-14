@@ -79,6 +79,18 @@ pub fn compress(state: &mut ConversationState, config: &CompressionConfig) -> Co
         stats.history_bytes_saved = bytes;
     }
 
+    // 历史截断会破坏 tool_use(tool_uses) 与 tool_result(tool_results) 的跨消息配对：
+    // assistant(tool_use) → user(tool_result)。
+    // 若留下孤立 tool_use/tool_result，上游会返回 400 "Improperly formed request"。
+    let (removed_tool_uses, removed_tool_results) = repair_tool_pairing_pass(state);
+    if removed_tool_uses > 0 || removed_tool_results > 0 {
+        tracing::debug!(
+            removed_tool_uses,
+            removed_tool_results,
+            "压缩后已修复 tool_use/tool_result 配对"
+        );
+    }
+
     stats
 }
 
@@ -466,6 +478,88 @@ fn compress_history_pass(
     (removed, bytes_saved)
 }
 
+/// 修复 tool_use/tool_result 配对（压缩后）。
+///
+/// 目标：
+/// - 移除 history/current 中孤立的 tool_result（其 tool_use_id 在 history 的 tool_use 中不存在）
+/// - 移除 history 中孤立的 tool_use（其 tool_use_id 在 history/current 的 tool_result 中不存在）
+///
+/// 返回 (移除的 tool_use 数, 移除的 tool_result 数)。
+fn repair_tool_pairing_pass(state: &mut ConversationState) -> (usize, usize) {
+    use std::collections::HashSet;
+
+    // 1) 收集 history 内所有 tool_use_id（上游通常要求 tool_result 必须能在历史 tool_use 中找到）
+    let mut tool_use_ids: HashSet<String> = HashSet::new();
+    for msg in &state.history {
+        if let Message::Assistant(a) = msg
+            && let Some(ref tool_uses) = a.assistant_response_message.tool_uses
+        {
+            for tu in tool_uses {
+                tool_use_ids.insert(tu.tool_use_id.clone());
+            }
+        }
+    }
+
+    // 2) 移除 history/current 中孤立 tool_result（没有对应 tool_use）
+    let mut removed_tool_results = 0usize;
+
+    for msg in &mut state.history {
+        if let Message::User(u) = msg {
+            let results = &mut u.user_input_message.user_input_message_context.tool_results;
+            let before = results.len();
+            results.retain(|tr| tool_use_ids.contains(&tr.tool_use_id));
+            removed_tool_results += before - results.len();
+        }
+    }
+
+    {
+        let results = &mut state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tool_results;
+        let before = results.len();
+        results.retain(|tr| tool_use_ids.contains(&tr.tool_use_id));
+        removed_tool_results += before - results.len();
+    }
+
+    // 3) 收集 history/current 内所有 tool_result 的 tool_use_id
+    let mut tool_result_ids: HashSet<String> = HashSet::new();
+    for msg in &state.history {
+        if let Message::User(u) = msg {
+            for tr in &u.user_input_message.user_input_message_context.tool_results {
+                tool_result_ids.insert(tr.tool_use_id.clone());
+            }
+        }
+    }
+    for tr in &state
+        .current_message
+        .user_input_message
+        .user_input_message_context
+        .tool_results
+    {
+        tool_result_ids.insert(tr.tool_use_id.clone());
+    }
+
+    // 4) 移除 history 内孤立 tool_use（没有对应 tool_result）
+    let mut removed_tool_uses = 0usize;
+    for msg in &mut state.history {
+        if let Message::Assistant(a) = msg
+            && let Some(ref mut tool_uses) = a.assistant_response_message.tool_uses
+        {
+            let before = tool_uses.len();
+            tool_uses.retain(|tu| tool_result_ids.contains(&tu.tool_use_id));
+            removed_tool_uses += before - tool_uses.len();
+
+            if tool_uses.is_empty() {
+                a.assistant_response_message.tool_uses = None;
+            }
+        }
+    }
+
+    (removed_tool_uses, removed_tool_results)
+}
+
 // ============ 工具函数 ============
 
 /// 安全 UTF-8 字符截断
@@ -641,11 +735,12 @@ mod tests {
             ToolUseEntry::new("t1", "write").with_input(long_input),
         ]);
 
+        // tool_use 必须有对应的 tool_result（Kiro 要求严格配对），否则会被压缩后的修复逻辑移除。
+        let current = UserInputMessage::new(" ", "claude-sonnet-4.5").with_context(
+            UserInputMessageContext::new().with_tool_results(vec![ToolResult::success("t1", "ok")]),
+        );
         let mut state = ConversationState::new("test")
-            .with_current_message(CurrentMessage::new(UserInputMessage::new(
-                "next",
-                "claude-sonnet-4.5",
-            )))
+            .with_current_message(CurrentMessage::new(current))
             .with_history(vec![
                 Message::User(HistoryUserMessage::new("do it", "claude-sonnet-4.5")),
                 Message::Assistant(HistoryAssistantMessage {
@@ -671,11 +766,11 @@ mod tests {
             ToolUseEntry::new("t1", "write").with_input(long_input),
         ]);
 
+        let current = UserInputMessage::new(" ", "claude-sonnet-4.5").with_context(
+            UserInputMessageContext::new().with_tool_results(vec![ToolResult::success("t1", "ok")]),
+        );
         let mut state = ConversationState::new("test")
-            .with_current_message(CurrentMessage::new(UserInputMessage::new(
-                "next",
-                "claude-sonnet-4.5",
-            )))
+            .with_current_message(CurrentMessage::new(current))
             .with_history(vec![
                 Message::User(HistoryUserMessage::new("do it", "claude-sonnet-4.5")),
                 Message::Assistant(HistoryAssistantMessage {
@@ -713,11 +808,11 @@ mod tests {
             ToolUseEntry::new("t1", "write").with_input(long_input),
         ]);
 
+        let current = UserInputMessage::new(" ", "claude-sonnet-4.5").with_context(
+            UserInputMessageContext::new().with_tool_results(vec![ToolResult::success("t1", "ok")]),
+        );
         let mut state = ConversationState::new("test")
-            .with_current_message(CurrentMessage::new(UserInputMessage::new(
-                "next",
-                "claude-sonnet-4.5",
-            )))
+            .with_current_message(CurrentMessage::new(current))
             .with_history(vec![
                 Message::User(HistoryUserMessage::new("do it", "claude-sonnet-4.5")),
                 Message::Assistant(HistoryAssistantMessage {
@@ -762,6 +857,76 @@ mod tests {
         // 第一对应该是 system pair
         if let Message::User(u) = &state.history[0] {
             assert!(u.user_input_message.content.contains("system prompt"));
+        }
+    }
+
+    #[test]
+    fn test_history_truncation_repairs_tool_pairing() {
+        // 构造典型 tool_use → tool_result 跨消息链路：
+        // assistant(tool_use) 紧跟 user(tool_result)。
+        // 当按 user+assistant 成对从前往后截断时，容易删掉 tool_use 而保留 tool_result。
+        let tool_use_id = "tooluse_1";
+
+        let system_user = Message::User(HistoryUserMessage::new(
+            "system",
+            "claude-sonnet-4.5",
+        ));
+        let system_assistant = Message::Assistant(HistoryAssistantMessage::new(
+            "I will follow these instructions.",
+        ));
+
+        let user1 = Message::User(HistoryUserMessage::new("do something", "claude-sonnet-4.5"));
+
+        let tool_use = ToolUseEntry::new(tool_use_id, "Read")
+            .with_input(serde_json::json!({"path": "a.txt"}));
+        let assistant1 = Message::Assistant(HistoryAssistantMessage {
+            assistant_response_message: AssistantMessage::new(" ").with_tool_uses(vec![tool_use]),
+        });
+
+        let tool_result_ctx = UserInputMessageContext::new()
+            .with_tool_results(vec![ToolResult::success(tool_use_id, "ok")]);
+        let user2 = Message::User(HistoryUserMessage {
+            user_input_message: UserMessage::new(" ", "claude-sonnet-4.5")
+                .with_context(tool_result_ctx),
+        });
+
+        let assistant2 = Message::Assistant(HistoryAssistantMessage::new("done"));
+
+        let mut state = ConversationState::new("test")
+            .with_current_message(CurrentMessage::new(UserInputMessage::new(
+                "next",
+                "claude-sonnet-4.5",
+            )))
+            .with_history(vec![
+                system_user,
+                system_assistant,
+                user1,
+                assistant1,
+                user2,
+                assistant2,
+            ]);
+
+        // 将历史限制到 1 轮（2+2=4 条），触发截断：会移除 user1+assistant1。
+        // 若不修复，user2 中的 tool_result 会变成 orphan，导致上游 400。
+        let config = CompressionConfig {
+            max_history_turns: 1,
+            max_history_chars: 0,
+            ..Default::default()
+        };
+
+        let _stats = compress(&mut state, &config);
+
+        // history 中不应存在 tool_result（因为对应 tool_use 已被截断移除）
+        for msg in &state.history {
+            if let Message::User(u) = msg {
+                assert!(
+                    u.user_input_message
+                        .user_input_message_context
+                        .tool_results
+                        .is_empty(),
+                    "history 中不应残留孤立 tool_result"
+                );
+            }
         }
     }
 
