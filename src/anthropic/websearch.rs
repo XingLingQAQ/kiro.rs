@@ -103,25 +103,30 @@ pub struct WebSearchResult {
     pub public_domain: Option<bool>,
 }
 
-/// 检查请求是否为纯 WebSearch 请求
+/// 检查请求是否包含 WebSearch 工具
 ///
-/// 条件：tools 有且只有一个，且 name 为 web_search
+/// 只要 tools 中出现 web_search（按 name 或 type 判断），就认为应走本地 WebSearch 处理。
 pub fn has_web_search_tool(req: &MessagesRequest) -> bool {
-    req.tools.as_ref().is_some_and(|tools| {
-        tools.len() == 1 && tools.first().is_some_and(|t| t.name == "web_search")
-    })
+    req.tools
+        .as_ref()
+        .is_some_and(|tools| tools.iter().any(|t| t.name == "web_search" || t.is_web_search()))
 }
 
 /// 从消息中提取搜索查询
 ///
-/// 读取 messages 的第一条消息的第一个内容块
+/// 读取 messages 中最后一条 user 消息的第一个内容块（更符合多轮对话场景）
 /// 并去除 "Perform a web search for the query: " 前缀
 pub fn extract_search_query(req: &MessagesRequest) -> Option<String> {
-    // 获取第一条消息
-    let first_msg = req.messages.first()?;
+    // 优先取最后一条 user 消息，否则回退到最后一条消息
+    let msg = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .or_else(|| req.messages.last())?;
 
     // 提取文本内容
-    let text = match &first_msg.content {
+    let text = match &msg.content {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(arr) => {
             // 获取第一个内容块
@@ -476,16 +481,71 @@ pub async fn handle_websearch_request(
 
     // 4. 生成 SSE 响应
     let model = payload.model.clone();
-    let stream =
-        create_websearch_sse_stream(model, query, tool_use_id, search_results, input_tokens);
+    if payload.stream {
+        let stream =
+            create_websearch_sse_stream(model, query, tool_use_id, search_results, input_tokens);
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header(header::CONNECTION, "keep-alive")
-        .body(Body::from_stream(stream))
-        .unwrap()
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .header(header::CONNECTION, "keep-alive")
+            .body(Body::from_stream(stream))
+            .unwrap();
+    }
+
+    let summary = generate_search_summary(&query, &search_results);
+    let search_content = if let Some(ref results) = search_results {
+        results
+            .results
+            .iter()
+            .map(|r| {
+                json!({
+                    "type": "web_search_result",
+                    "title": r.title,
+                    "url": r.url,
+                    "encrypted_content": r.snippet.clone().unwrap_or_default(),
+                    "page_age": null
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
+
+    let output_tokens = (summary.len() as i32 + 3) / 4; // 简单估算
+
+    let response_body = json!({
+        "id": format!("msg_{}", &Uuid::new_v4().to_string().replace('-', "")[..24]),
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [
+            {
+                "type": "server_tool_use",
+                "id": tool_use_id,
+                "name": "web_search",
+                "input": { "query": query }
+            },
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": tool_use_id,
+                "content": search_content
+            },
+            {
+                "type": "text",
+                "text": summary
+            }
+        ],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens
+        }
+    });
+
+    (StatusCode::OK, Json(response_body)).into_response()
 }
 
 /// 调用 Kiro MCP API
@@ -549,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn test_has_web_search_tool_multiple_tools() {
+    fn test_has_web_search_tool_when_multiple_tools() {
         use crate::anthropic::types::{Message, Tool};
 
         let req = MessagesRequest {
@@ -583,8 +643,36 @@ mod tests {
             metadata: None,
         };
 
-        // 多个工具时不应该被识别为纯 websearch 请求
-        assert!(!has_web_search_tool(&req));
+        assert!(has_web_search_tool(&req));
+    }
+
+    #[test]
+    fn test_has_web_search_tool_when_name_missing_but_type_matches() {
+        use crate::anthropic::types::{Message, Tool};
+
+        let req = MessagesRequest {
+            model: "claude-sonnet-4".to_string(),
+            max_tokens: 1024,
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: serde_json::json!("test"),
+            }],
+            stream: true,
+            system: None,
+            tools: Some(vec![Tool {
+                tool_type: Some("web_search_20250305".to_string()),
+                name: "".to_string(), // 模拟客户端只传 type 的情况
+                description: String::new(),
+                input_schema: Default::default(),
+                max_uses: Some(8),
+            }]),
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        };
+
+        assert!(has_web_search_tool(&req));
     }
 
     #[test]
@@ -637,6 +725,43 @@ mod tests {
 
         let query = extract_search_query(&req);
         assert_eq!(query, Some("What is the weather today?".to_string()));
+    }
+
+    #[test]
+    fn test_extract_search_query_uses_last_user_message() {
+        use crate::anthropic::types::Message;
+
+        let req = MessagesRequest {
+            model: "claude-sonnet-4".to_string(),
+            max_tokens: 1024,
+            messages: vec![
+                Message {
+                    role: "user".to_string(),
+                    content: serde_json::json!("not a query"),
+                },
+                Message {
+                    role: "assistant".to_string(),
+                    content: serde_json::json!("ok"),
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: serde_json::json!([{
+                        "type": "text",
+                        "text": "Perform a web search for the query: rust"
+                    }]),
+                },
+            ],
+            stream: true,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        };
+
+        let query = extract_search_query(&req);
+        assert_eq!(query, Some("rust".to_string()));
     }
 
     #[test]
