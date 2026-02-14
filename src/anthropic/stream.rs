@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::common::utf8::floor_char_boundary;
 use crate::kiro::model::events::Event;
 
 /// 需要跳过的包裹字符
@@ -690,7 +691,7 @@ impl StreamContext {
                         .thinking_buffer
                         .len()
                         .saturating_sub("<thinking>".len());
-                    let safe_len = self.thinking_buffer.floor_char_boundary(target_len);
+                    let safe_len = floor_char_boundary(&self.thinking_buffer, target_len);
                     if safe_len > 0 {
                         let safe_content = self.thinking_buffer[..safe_len].to_string();
                         // 如果 thinking 尚未提取，且安全内容只是空白字符，
@@ -760,7 +761,7 @@ impl StreamContext {
                         .thinking_buffer
                         .len()
                         .saturating_sub("</thinking>\n\n".len());
-                    let safe_len = self.thinking_buffer.floor_char_boundary(target_len);
+                    let safe_len = floor_char_boundary(&self.thinking_buffer, target_len);
                     if safe_len > 0 {
                         let safe_content = self.thinking_buffer[..safe_len].to_string();
                         if let Some(thinking_index) = self.thinking_block_index

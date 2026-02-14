@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration as StdDuration, Instant};
 use tokio::sync::Mutex as TokioMutex;
 
+use crate::common::utf8::floor_char_boundary;
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::affinity::UserAffinityManager;
 use crate::kiro::background_refresh::{
@@ -2417,7 +2418,7 @@ impl MultiTokenManager {
     /// 用于批量导入时的去重检查，通过比较 refreshToken 前 32 字符判断是否重复
     /// 使用 floor_char_boundary 安全截断，避免在多字节字符中间切割导致 panic
     pub fn has_refresh_token_prefix(&self, refresh_token: &str) -> bool {
-        let prefix_len = refresh_token.floor_char_boundary(32);
+        let prefix_len = floor_char_boundary(refresh_token, 32);
         let new_prefix = &refresh_token[..prefix_len];
 
         let entries = self.entries.lock();
@@ -2426,7 +2427,7 @@ impl MultiTokenManager {
                 .refresh_token
                 .as_ref()
                 .map(|rt| {
-                    let existing_prefix_len = rt.floor_char_boundary(32);
+                    let existing_prefix_len = floor_char_boundary(rt, 32);
                     &rt[..existing_prefix_len] == new_prefix
                 })
                 .unwrap_or(false)

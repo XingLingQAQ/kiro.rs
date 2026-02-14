@@ -8,6 +8,7 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use crate::common::utf8::floor_char_boundary;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::MultiTokenManager;
 
@@ -571,7 +572,7 @@ impl AdminService {
             .as_ref()
             .map(|rt| {
                 if rt.len() >= 16 {
-                    let end = rt.floor_char_boundary(16);
+                    let end = floor_char_boundary(rt, 16);
                     format!("{}...", &rt[..end])
                 } else {
                     rt.clone()

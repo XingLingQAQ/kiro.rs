@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use uuid::Uuid;
 
+use crate::common::utf8::floor_char_boundary;
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::machine_id;
 use crate::kiro::token_manager::{CallContext, MultiTokenManager};
@@ -983,7 +984,7 @@ impl KiroProvider {
             return one_line;
         }
 
-        let end = one_line.floor_char_boundary(max_len);
+        let end = floor_char_boundary(&one_line, max_len);
         format!("{}...", &one_line[..end])
     }
 
