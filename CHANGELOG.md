@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.0.15] - 2026-02-15
 
 ### Added
 - **Opus 4.6 1M 上下文窗口支持** (`src/anthropic/types.rs`, `src/anthropic/handlers.rs`, `src/anthropic/stream.rs`)
