@@ -194,7 +194,9 @@ fn default_image_multi_threshold() -> usize {
 }
 
 fn default_max_request_body_bytes() -> usize {
-    400_000
+    // 上游对请求体大小存在硬性限制（实测约 5MiB 左右会触发 400），
+    // 这里默认设置为 4.5MiB 留出安全余量。
+    4_718_592
 }
 
 /// 输入压缩配置

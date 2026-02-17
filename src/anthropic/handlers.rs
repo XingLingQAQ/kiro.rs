@@ -71,8 +71,9 @@ struct AdaptiveCompressionOutcome {
 
 /// 计算 KiroRequest 中所有图片 base64 数据的总字节数。
 ///
-/// 图片在上游 API 中按像素块计算 token，而非按 base64 字节数，
-/// 因此在做请求体大小阈值判断时应扣除这部分字节，避免误拒。
+/// 该统计用于归因请求体大小（图片 base64 往往占用大量 bytes）。
+/// 注意：上游存在请求体大小硬限制（约 5MiB），因此图片也必须控制体积；
+/// `max_request_body_bytes` 的校验以实际序列化后的总字节数为准。
 fn total_image_bytes(kiro_request: &KiroRequest) -> usize {
     let state = &kiro_request.conversation_state;
     let mut total = 0usize;
@@ -100,11 +101,7 @@ fn adaptive_shrink_request_body(
     max_body: usize,
     request_body: &mut String,
 ) -> Result<Option<AdaptiveCompressionOutcome>, serde_json::Error> {
-    // 扣除图片 base64 数据的字节数：图片在上游按像素块计 token，不应计入 body 大小阈值
-    let img_bytes = total_image_bytes(kiro_request);
-    let effective_len = request_body.len().saturating_sub(img_bytes);
-
-    if max_body == 0 || effective_len <= max_body || !base_config.enabled {
+    if max_body == 0 || request_body.len() <= max_body || !base_config.enabled {
         return Ok(None);
     }
 
@@ -119,13 +116,62 @@ fn adaptive_shrink_request_body(
     };
 
     // 二次压缩策略：
-    // 1) 逐步降低 tool_result_max_chars
-    // 2) 逐步降低 tool_use_input_max_chars
-    // 3) 按 request_body_bytes 逐轮移除最老的 user+assistant 两条消息（保留前 2 条）
-    // 4) 截断超长用户消息内容（最后手段）
+    // 1) 逐步降低 tool_result_max_chars（仅当存在 tool_result/tools）
+    // 2) 逐步降低 tool_use_input_max_chars（仅当存在 tool_use）
+    // 3) 截断超长用户消息内容（当单条消息已超过阈值时优先）
+    // 4) 按 request_body_bytes 成对移除最老的 user+assistant 两条消息（保留前 2 条）
     //
     // 每轮都会重新跑一次压缩管道（包含 tool 配对修复），再重新序列化计算字节数。
     let mut adaptive_config = base_config.clone();
+
+    // 是否存在任何 tool_result / tools（否则降低阈值只会浪费迭代次数）
+    let has_any_tool_results_or_tools = {
+        let state = &kiro_request.conversation_state;
+        if !state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tool_results
+            .is_empty()
+            || !state
+                .current_message
+                .user_input_message
+                .user_input_message_context
+                .tools
+                .is_empty()
+        {
+            true
+        } else {
+            state.history.iter().any(|msg| match msg {
+                crate::kiro::model::requests::conversation::Message::User(u) => {
+                    !u.user_input_message
+                        .user_input_message_context
+                        .tool_results
+                        .is_empty()
+                        || !u
+                            .user_input_message
+                            .user_input_message_context
+                            .tools
+                            .is_empty()
+                }
+                _ => false,
+            })
+        }
+    };
+
+    // 是否存在任何 tool_use（否则降低阈值只会浪费迭代次数）
+    let has_any_tool_uses = kiro_request
+        .conversation_state
+        .history
+        .iter()
+        .any(|msg| match msg {
+            crate::kiro::model::requests::conversation::Message::Assistant(a) => a
+                .assistant_response_message
+                .tool_uses
+                .as_ref()
+                .is_some_and(|t| !t.is_empty()),
+            _ => false,
+        });
 
     // 扫描所有用户消息，找到最大 content 字符数作为初始 message_content_max_chars
     let max_content_chars = {
@@ -148,22 +194,24 @@ fn adaptive_shrink_request_body(
         (max_content_chars * 3 / 4).max(ADAPTIVE_MIN_MESSAGE_CONTENT_MAX_CHARS);
 
     for _ in 0..ADAPTIVE_COMPRESSION_MAX_ITERS {
-        // 每轮重新计算图片字节（历史截断可能移除含图片的消息）
-        let loop_img_bytes = total_image_bytes(kiro_request);
-        if request_body.len().saturating_sub(loop_img_bytes) <= max_body {
+        if request_body.len() <= max_body {
             break;
         }
 
         let mut changed = false;
 
-        if adaptive_config.tool_result_max_chars > ADAPTIVE_MIN_TOOL_RESULT_MAX_CHARS {
+        if has_any_tool_results_or_tools
+            && adaptive_config.tool_result_max_chars > ADAPTIVE_MIN_TOOL_RESULT_MAX_CHARS
+        {
             let next = (adaptive_config.tool_result_max_chars * 3 / 4)
                 .max(ADAPTIVE_MIN_TOOL_RESULT_MAX_CHARS);
             if next < adaptive_config.tool_result_max_chars {
                 adaptive_config.tool_result_max_chars = next;
                 changed = true;
             }
-        } else if adaptive_config.tool_use_input_max_chars > ADAPTIVE_MIN_TOOL_USE_INPUT_MAX_CHARS {
+        } else if has_any_tool_uses
+            && adaptive_config.tool_use_input_max_chars > ADAPTIVE_MIN_TOOL_USE_INPUT_MAX_CHARS
+        {
             let next = (adaptive_config.tool_use_input_max_chars * 3 / 4)
                 .max(ADAPTIVE_MIN_TOOL_USE_INPUT_MAX_CHARS);
             if next < adaptive_config.tool_use_input_max_chars {
@@ -171,14 +219,25 @@ fn adaptive_shrink_request_body(
                 changed = true;
             }
         } else {
+            // 如果任意单条 user content 已经超过 max_body，则移除历史并不能让请求落到阈值内，
+            // 必须优先截断超长消息内容。
+            let max_single_user_content_bytes = {
+                let state = &kiro_request.conversation_state;
+                let mut max_bytes = state.current_message.user_input_message.content.len();
+                for msg in &state.history {
+                    if let crate::kiro::model::requests::conversation::Message::User(u) = msg {
+                        max_bytes = max_bytes.max(u.user_input_message.content.len());
+                    }
+                }
+                max_bytes
+            };
+
             let history = &mut kiro_request.conversation_state.history;
-            if history.len() > ADAPTIVE_HISTORY_PRESERVE_MESSAGES + 2 {
-                history.remove(ADAPTIVE_HISTORY_PRESERVE_MESSAGES);
-                history.remove(ADAPTIVE_HISTORY_PRESERVE_MESSAGES);
-                outcome.additional_history_turns_removed += 1;
-                changed = true;
-            } else if message_content_max_chars >= ADAPTIVE_MIN_MESSAGE_CONTENT_MAX_CHARS {
-                // 第四层：截断超长消息内容（最后手段）
+            if (max_single_user_content_bytes > max_body
+                || history.len() <= ADAPTIVE_HISTORY_PRESERVE_MESSAGES + 2)
+                && message_content_max_chars >= ADAPTIVE_MIN_MESSAGE_CONTENT_MAX_CHARS
+            {
+                // 第三层：截断超长消息内容
                 let saved = super::compressor::compress_long_messages_pass(
                     &mut kiro_request.conversation_state,
                     message_content_max_chars,
@@ -191,6 +250,19 @@ fn adaptive_shrink_request_body(
                 // 每轮递减 3/4
                 message_content_max_chars =
                     (message_content_max_chars * 3 / 4).max(ADAPTIVE_MIN_MESSAGE_CONTENT_MAX_CHARS);
+            } else if history.len() > ADAPTIVE_HISTORY_PRESERVE_MESSAGES + 2 {
+                // 第四层：移除最老历史消息（成对移除 user+assistant）
+                let preserve = ADAPTIVE_HISTORY_PRESERVE_MESSAGES;
+                let min_len = preserve + 2;
+                let removable = history.len().saturating_sub(min_len);
+                // 单轮最多移除 16 条消息（8 轮），避免一次性丢弃过多上下文
+                let mut remove_msgs = removable.min(16);
+                remove_msgs -= remove_msgs % 2; // 保持成对移除
+                if remove_msgs > 0 {
+                    history.drain(preserve..preserve + remove_msgs);
+                    outcome.additional_history_turns_removed += remove_msgs / 2;
+                    changed = true;
+                }
             }
         }
 
@@ -522,7 +594,7 @@ pub async fn post_messages(
         }
     };
 
-    // 输出压缩统计（以字节为单位；用于排查上游 ~400KB 请求体限制）
+    // 输出压缩统计（以字节为单位；用于排查上游请求体大小限制，实测约 5MiB 左右会触发 400）
     if let Some(ref stats) = conversion_result.compression_stats {
         tracing::info!(
             estimated_input_tokens,
@@ -558,11 +630,9 @@ pub async fn post_messages(
         }
     };
 
-    // 请求体大小预检（扣除图片 base64 字节：图片按像素块计 token，不应计入 body 大小阈值）
+    // 请求体大小预检（上游存在硬性请求体大小限制；按实际序列化后的总字节数判断）
     let max_body = state.compression_config.max_request_body_bytes;
-    let img_bytes = total_image_bytes(&kiro_request);
-    let effective_body_len = request_body.len().saturating_sub(img_bytes);
-    if max_body > 0 && effective_body_len > max_body && state.compression_config.enabled {
+    if max_body > 0 && request_body.len() > max_body && state.compression_config.enabled {
         // 自适应二次压缩：按 request_body_bytes 迭代截断，尽量把请求缩到阈值内
         match adaptive_shrink_request_body(
             &mut kiro_request,
@@ -572,6 +642,7 @@ pub async fn post_messages(
         ) {
             Ok(Some(outcome)) => {
                 tracing::warn!(
+                    conversation_id = kiro_request.conversation_state.conversation_id.as_str(),
                     initial_bytes = outcome.initial_bytes,
                     final_bytes = outcome.final_bytes,
                     threshold = max_body,
@@ -598,11 +669,12 @@ pub async fn post_messages(
         }
     }
 
-    // 压缩后再次检查（扣除图片字节）
+    // 压缩后再次检查（输出 image_bytes/non-image bytes 便于排查）
     let final_img_bytes = total_image_bytes(&kiro_request);
     let final_effective_len = request_body.len().saturating_sub(final_img_bytes);
-    if max_body > 0 && final_effective_len > max_body {
+    if max_body > 0 && request_body.len() > max_body {
         tracing::warn!(
+            conversation_id = kiro_request.conversation_state.conversation_id.as_str(),
             request_body_bytes = request_body.len(),
             image_bytes = final_img_bytes,
             effective_bytes = final_effective_len,
@@ -619,7 +691,7 @@ pub async fn post_messages(
             Json(ErrorResponse::new(
                 "invalid_request_error",
                 format!(
-                    "Request too large ({} bytes, {} image bytes excluded, {} effective, limit {}). Reduce conversation history or tool output.",
+                    "Request too large ({} bytes total; images {} bytes; non-image {} bytes; limit {}). Reduce conversation history/tool output or number/size of images.",
                     request_body.len(),
                     final_img_bytes,
                     final_effective_len,
@@ -1159,7 +1231,7 @@ pub async fn post_messages_cc(
         }
     };
 
-    // 输出压缩统计（以字节为单位；用于排查上游 ~400KB 请求体限制）
+    // 输出压缩统计（以字节为单位；用于排查上游请求体大小限制，实测约 5MiB 左右会触发 400）
     if let Some(ref stats) = conversion_result.compression_stats {
         tracing::info!(
             estimated_input_tokens,
@@ -1195,11 +1267,9 @@ pub async fn post_messages_cc(
         }
     };
 
-    // 请求体大小预检（扣除图片 base64 字节：图片按像素块计 token，不应计入 body 大小阈值）
+    // 请求体大小预检（上游存在硬性请求体大小限制；按实际序列化后的总字节数判断）
     let max_body = state.compression_config.max_request_body_bytes;
-    let img_bytes = total_image_bytes(&kiro_request);
-    let effective_body_len = request_body.len().saturating_sub(img_bytes);
-    if max_body > 0 && effective_body_len > max_body && state.compression_config.enabled {
+    if max_body > 0 && request_body.len() > max_body && state.compression_config.enabled {
         // 自适应二次压缩：按 request_body_bytes 迭代截断，尽量把请求缩到阈值内
         match adaptive_shrink_request_body(
             &mut kiro_request,
@@ -1209,6 +1279,7 @@ pub async fn post_messages_cc(
         ) {
             Ok(Some(outcome)) => {
                 tracing::warn!(
+                    conversation_id = kiro_request.conversation_state.conversation_id.as_str(),
                     initial_bytes = outcome.initial_bytes,
                     final_bytes = outcome.final_bytes,
                     threshold = max_body,
@@ -1235,11 +1306,12 @@ pub async fn post_messages_cc(
         }
     }
 
-    // 压缩后再次检查（扣除图片字节）
+    // 压缩后再次检查（输出 image_bytes/non-image bytes 便于排查）
     let final_img_bytes = total_image_bytes(&kiro_request);
     let final_effective_len = request_body.len().saturating_sub(final_img_bytes);
-    if max_body > 0 && final_effective_len > max_body {
+    if max_body > 0 && request_body.len() > max_body {
         tracing::warn!(
+            conversation_id = kiro_request.conversation_state.conversation_id.as_str(),
             request_body_bytes = request_body.len(),
             image_bytes = final_img_bytes,
             effective_bytes = final_effective_len,
@@ -1256,7 +1328,7 @@ pub async fn post_messages_cc(
             Json(ErrorResponse::new(
                 "invalid_request_error",
                 format!(
-                    "Request too large ({} bytes, {} image bytes excluded, {} effective, limit {}). Reduce conversation history or tool output.",
+                    "Request too large ({} bytes total; images {} bytes; non-image {} bytes; limit {}). Reduce conversation history/tool output or number/size of images.",
                     request_body.len(),
                     final_img_bytes,
                     final_effective_len,
