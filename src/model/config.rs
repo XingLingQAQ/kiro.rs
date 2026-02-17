@@ -182,7 +182,7 @@ fn default_image_max_long_edge() -> u32 {
 }
 
 fn default_image_max_pixels_single() -> u32 {
-    1_150_000
+    4_000_000
 }
 
 fn default_image_max_pixels_multi() -> u32 {
@@ -239,7 +239,7 @@ pub struct CompressionConfig {
     /// 图片长边最大像素，默认 4000（Anthropic 硬限制 8000，留安全余量；窄长图受益于更大长边）
     #[serde(default = "default_image_max_long_edge")]
     pub image_max_long_edge: u32,
-    /// 单张图片最大总像素，默认 1_150_000（约 1600 tokens）
+    /// 单张图片最大总像素，默认 4_000_000（2000×2000，与多图限制一致）
     #[serde(default = "default_image_max_pixels_single")]
     pub image_max_pixels_single: u32,
     /// 多图模式下单张图片最大总像素，默认 4_000_000（2000×2000）
