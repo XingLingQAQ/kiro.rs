@@ -441,18 +441,16 @@ fn process_message_content(
                                         total_image_count,
                                     ) {
                                         Ok(gif) => {
-                                            let total_final_bytes: usize = gif
-                                                .frames
-                                                .iter()
-                                                .map(|f| f.final_bytes_len)
-                                                .sum();
+                                            let total_final_bytes: usize =
+                                                gif.frames.iter().map(|f| f.final_bytes_len).sum();
                                             tracing::info!(
                                                 duration_ms = gif.duration_ms,
                                                 source_frames = gif.source_frames,
                                                 sampled_frames = gif.frames.len(),
                                                 sampling_interval_ms = gif.sampling_interval_ms,
                                                 output_format = gif.output_format,
-                                                original_bytes_len = gif.frames[0].original_bytes_len,
+                                                original_bytes_len =
+                                                    gif.frames[0].original_bytes_len,
                                                 total_final_bytes = total_final_bytes,
                                                 "GIF 已抽帧并重编码"
                                             );
@@ -530,11 +528,13 @@ fn process_message_content(
                                                     result.tokens
                                                 );
                                             }
-                                            images.push(KiroImage::from_base64(format, result.data));
+                                            images
+                                                .push(KiroImage::from_base64(format, result.data));
                                         }
                                         Err(e) => {
                                             tracing::warn!("图片处理失败，使用原始数据: {}", e);
-                                            images.push(KiroImage::from_base64(format, source.data));
+                                            images
+                                                .push(KiroImage::from_base64(format, source.data));
                                         }
                                     }
                                 }
