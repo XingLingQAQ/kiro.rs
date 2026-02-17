@@ -47,15 +47,19 @@ fn is_input_too_long_error(err: &Error) -> bool {
     // - Input is too long
     //
     // 这类错误是确定性的请求问题（缩短输入才可恢复），不应返回 5xx（会诱发客户端重试）。
+    // 注意：不包含 "Improperly formed request"，该错误可能由空消息内容等格式问题引起
     let s = err.to_string();
-    s.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD")
-        || s.contains("Input is too long")
-        || s.contains("Improperly formed request")
+    s.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD") || s.contains("Input is too long")
 }
 
 fn is_quota_exhausted_error(err: &Error) -> bool {
     let s = err.to_string();
     s.contains("所有凭据已用尽")
+}
+
+fn is_improperly_formed_request_error(err: &Error) -> bool {
+    let s = err.to_string();
+    s.contains("Improperly formed request")
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -296,6 +300,21 @@ fn map_kiro_provider_error_to_response(request_body: &str, err: Error) -> Respon
             Json(ErrorResponse::new(
                 "invalid_request_error",
                 "Input is too long (CONTENT_LENGTH_EXCEEDS_THRESHOLD). Reduce conversation history/system/tools; retrying the same request will not help.",
+            )),
+        )
+            .into_response();
+    }
+
+    if is_improperly_formed_request_error(&err) {
+        tracing::warn!(
+            error = %err,
+            "上游拒绝请求：请求格式错误（可能是空消息内容或其他格式问题）"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "invalid_request_error",
+                "Improperly formed request. Check message content is not empty and request format is valid.",
             )),
         )
             .into_response();
@@ -583,6 +602,9 @@ pub async fn post_messages(
                 }
                 ConversionError::EmptyMessages => {
                     ("invalid_request_error", "消息列表为空".to_string())
+                }
+                ConversionError::EmptyMessageContent => {
+                    ("invalid_request_error", "消息内容为空".to_string())
                 }
             };
             tracing::warn!("请求转换失败: {}", e);
@@ -1220,6 +1242,9 @@ pub async fn post_messages_cc(
                 }
                 ConversionError::EmptyMessages => {
                     ("invalid_request_error", "消息列表为空".to_string())
+                }
+                ConversionError::EmptyMessageContent => {
+                    ("invalid_request_error", "消息内容为空".to_string())
                 }
             };
             tracing::warn!("请求转换失败: {}", e);

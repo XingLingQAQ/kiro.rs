@@ -176,6 +176,7 @@ pub struct ConversionResult {
 pub enum ConversionError {
     UnsupportedModel(String),
     EmptyMessages,
+    EmptyMessageContent,
 }
 
 impl std::fmt::Display for ConversionError {
@@ -183,6 +184,7 @@ impl std::fmt::Display for ConversionError {
         match self {
             ConversionError::UnsupportedModel(model) => write!(f, "模型不支持: {}", model),
             ConversionError::EmptyMessages => write!(f, "消息列表为空"),
+            ConversionError::EmptyMessageContent => write!(f, "消息内容为空"),
         }
     }
 }
@@ -283,6 +285,29 @@ pub fn convert_request(
     } else {
         &req.messages
     };
+
+    // 2.6. 验证最后一条消息内容不为空
+    // 检查最后一条消息（经过 prefill 处理后）是否有有效内容
+    let last_message = messages.last().unwrap();
+    let has_valid_content = match &last_message.content {
+        serde_json::Value::String(s) => !s.trim().is_empty(),
+        serde_json::Value::Array(arr) => arr.iter().any(|item| {
+            if let Ok(block) = serde_json::from_value::<ContentBlock>(item.clone()) {
+                match block.block_type.as_str() {
+                    "text" => block.text.as_ref().is_some_and(|t| !t.trim().is_empty()),
+                    "image" | "tool_use" | "tool_result" => true,
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        }),
+        _ => false,
+    };
+    if !has_valid_content {
+        tracing::warn!("最后一条消息内容为空（仅包含空白文本或无内容）");
+        return Err(ConversionError::EmptyMessageContent);
+    }
 
     // 3. 生成会话 ID 和代理 ID
     // 优先从 metadata.user_id 中提取 session UUID 作为 conversationId
@@ -2304,6 +2329,102 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_request_empty_message_content() {
+        // 测试空消息内容应返回 EmptyMessageContent 错误
+        use super::super::types::Message as AnthropicMessage;
+
+        let req = MessagesRequest {
+            model: "claude-sonnet-4".to_string(),
+            max_tokens: 1024,
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!(""),
+            }],
+            stream: false,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        };
+
+        let err = convert_request(&req, &CompressionConfig::default()).unwrap_err();
+        assert!(
+            matches!(err, ConversionError::EmptyMessageContent),
+            "空消息内容应返回 EmptyMessageContent，实际: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_convert_request_empty_text_block() {
+        // 测试仅包含空白文本块的消息应返回 EmptyMessageContent 错误
+        use super::super::types::Message as AnthropicMessage;
+
+        let req = MessagesRequest {
+            model: "claude-sonnet-4".to_string(),
+            max_tokens: 1024,
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!([
+                    {"type": "text", "text": "   "},
+                    {"type": "text", "text": "\n\t"}
+                ]),
+            }],
+            stream: false,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        };
+
+        let err = convert_request(&req, &CompressionConfig::default()).unwrap_err();
+        assert!(
+            matches!(err, ConversionError::EmptyMessageContent),
+            "仅包含空白文本的消息应返回 EmptyMessageContent，实际: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_convert_request_prefill_with_empty_user_message() {
+        // 测试 prefill 场景下，如果回退后的 user 消息为空，应返回 EmptyMessageContent 错误
+        use super::super::types::Message as AnthropicMessage;
+
+        let req = MessagesRequest {
+            model: "claude-sonnet-4".to_string(),
+            max_tokens: 1024,
+            messages: vec![
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: serde_json::json!(""),
+                },
+                AnthropicMessage {
+                    role: "assistant".to_string(),
+                    content: serde_json::json!("Hi there"),
+                },
+            ],
+            stream: false,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        };
+
+        let err = convert_request(&req, &CompressionConfig::default()).unwrap_err();
+        assert!(
+            matches!(err, ConversionError::EmptyMessageContent),
+            "prefill 回退后的空 user 消息应返回 EmptyMessageContent，实际: {:?}",
+            err
+        );
+    }
+
+    #[test]
     fn test_merge_consecutive_assistant_messages() {
         // 测试连续 assistant 消息被正确合并（Issue #79）
         use super::super::types::Message as AnthropicMessage;
@@ -2409,13 +2530,12 @@ mod tests {
         // 验证历史中的 assistant 消息包含 tool_use
         let mut found_tool_use = false;
         for msg in &state.history {
-            if let Message::Assistant(assistant_msg) = msg {
-                if let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses {
-                    if tool_uses.iter().any(|t| t.tool_use_id == "toolu_01XYZ") {
-                        found_tool_use = true;
-                        break;
-                    }
-                }
+            if let Message::Assistant(assistant_msg) = msg
+                && let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses
+                && tool_uses.iter().any(|t| t.tool_use_id == "toolu_01XYZ")
+            {
+                found_tool_use = true;
+                break;
             }
         }
         assert!(found_tool_use, "合并后的 assistant 消息应包含 tool_use");

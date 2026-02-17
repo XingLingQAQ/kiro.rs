@@ -1,5 +1,20 @@
 # Changelog
 
+## [v1.0.20] - 2026-02-17
+
+### Fixed
+- **空消息内容验证与错误分类改进** (`src/anthropic/converter.rs`, `src/anthropic/handlers.rs`)
+  - 新增 `ConversionError::EmptyMessageContent` 错误类型，在请求转换阶段验证消息内容不为空
+  - 在 prefill 处理后验证最后一条消息内容有效性，支持字符串和数组两种 content 格式
+  - 检测空字符串、空白字符、空数组等情况，避免向上游发送无效请求
+  - 修复 `is_input_too_long_error` 错误地将 "Improperly formed request" 归类为上下文过长错误
+  - 新增 `is_improperly_formed_request_error` 函数专门处理格式错误，返回准确的错误信息
+  - 新增 3 个测试用例验证空消息内容检测功能
+- **图片文件大小压缩优化** (`src/image.rs`)
+  - 新增基于文件大小的强制重新编码逻辑：即使图片尺寸符合要求，如果文件大小超过 200KB 也会重新编码降低质量
+  - 修复小尺寸高质量图片（如 483x480 但 631KB）直接透传导致请求体过大的问题
+  - 新增日志输出追踪大文件重新编码过程和压缩率
+
 ## [v1.0.19] - 2026-02-17
 
 ### Changed
