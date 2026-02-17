@@ -21,7 +21,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# 覆盖常见 CSI 序列（含少见的 ':' 参数分隔符），避免污染 URL/字段解析。
+ANSI_RE = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]")
+KV_RE = re.compile(r"(\w+)=(\d+(?:\.\d+)?|\"[^\"]*\"|[^\s,]+)")
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,11 @@ class RequestSummary:
 
 def strip_ansi(s: str) -> str:
     return ANSI_RE.sub("", s)
+
+
+def parse_kv(line: str) -> Dict[str, str]:
+    """从 tracing 结构化行中提取所有 key=value 对。"""
+    return {m.group(1): m.group(2).strip('"') for m in KV_RE.finditer(line)}
 
 
 def iter_request_bodies(log_text: str) -> Iterable[Tuple[int, Dict[str, Any]]]:
@@ -346,8 +353,9 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--max-samples", type=int, default=5, help="每类问题输出样本数量")
     parser.add_argument("--dump-dir", default=None, help="可选：把 request_body JSON 按行号落盘")
     parser.add_argument("--max-history", type=int, default=100, help="history 过长阈值（启发式）")
-    parser.add_argument("--large-bytes", type=int, default=400_000, help="payload 大阈值（启发式）")
-    parser.add_argument("--huge-bytes", type=int, default=800_000, help="payload 巨大阈值（启发式）")
+    # 上游存在约 5MiB 左右的硬限制；默认用 4.5MiB 作为“接近风险”的提示阈值。
+    parser.add_argument("--large-bytes", type=int, default=4_718_592, help="payload 大阈值（启发式）")
+    parser.add_argument("--huge-bytes", type=int, default=8_388_608, help="payload 巨大阈值（启发式）")
     args = parser.parse_args(argv)
 
     log_path = args.log
@@ -361,11 +369,39 @@ def main(argv: List[str]) -> int:
     if dump_dir:
         os.makedirs(dump_dir, exist_ok=True)
 
+    # 先扫描项目侧“请求体超限，拒绝发送”的本地拦截（用于验证 4.5MiB 截断/拒绝是否生效）
+    print("=" * 60)
+    print("Phase 0: 扫描本地请求体超限拒绝")
+    print("=" * 60)
+    local_rejects = _scan_local_rejects(log_text)
+    if local_rejects:
+        for r in local_rejects[: args.max_samples]:
+            print(
+                "\n  [line {line}] effective_bytes={eff} threshold={th} body={body} image={img} conversationId={cid}".format(
+                    line=r.get("line_no"),
+                    eff=r.get("effective_bytes", "?"),
+                    th=r.get("threshold", "?"),
+                    body=r.get("request_body_bytes", "?"),
+                    img=r.get("image_bytes", "?"),
+                    cid=r.get("conversation_id") or "None",
+                )
+            )
+        if len(local_rejects) > args.max_samples:
+            print(f"\n  ... ({len(local_rejects) - args.max_samples} more)")
+    else:
+        print("  未发现本地请求体超限拒绝")
+    print("")
+
     # 先扫描所有 400 Improperly formed request 的 ERROR 行，提取上下文
     print("=" * 60)
     print("Phase 1: 扫描 400 Improperly formed request 错误")
     print("=" * 60)
-    error_lines = _scan_400_errors(log_text)
+    error_lines = _scan_400_errors(
+        log_text,
+        max_history_messages=args.max_history,
+        large_payload_bytes=args.large_bytes,
+        huge_payload_bytes=args.huge_bytes,
+    )
     if error_lines:
         for el in error_lines:
             print(f"\n  [line {el['line_no']}] bytes={el.get('body_bytes', '?')} "
@@ -466,7 +502,13 @@ def main(argv: List[str]) -> int:
     return 0
 
 
-def _scan_400_errors(log_text: str) -> List[Dict[str, Any]]:
+def _scan_400_errors(
+    log_text: str,
+    *,
+    max_history_messages: int,
+    large_payload_bytes: int,
+    huge_payload_bytes: int,
+) -> List[Dict[str, Any]]:
     """扫描日志中的 400 Improperly formed request 错误行，关联最近的请求体。
 
     对每个 400 错误，向上查找最近的 'Kiro request body:' DEBUG 行，
@@ -482,53 +524,122 @@ def _scan_400_errors(log_text: str) -> List[Dict[str, Any]]:
         if "Improperly formed request" not in line:
             continue
         clean = strip_ansi(line)
+        # 避免同一错误被多条日志重复命中（provider ERROR 与 handler WARN 都可能包含该子串）
+        # 优先仅统计 provider ERROR（通常包含 request_url=...）
+        if "request_url=" not in clean:
+            continue
         entry: Dict[str, Any] = {"line_no": line_no_0 + 1}
 
         m = body_bytes_re.search(clean)
         if m:
             entry["body_bytes"] = int(m.group(1))
+        else:
+            # provider ERROR 行通常不带 body bytes，向上关联最近的构建日志/handler WARN（最多回溯 30 行）
+            for back in range(1, min(31, line_no_0 + 1)):
+                prev = strip_ansi(lines[line_no_0 - back])
+                m2 = body_bytes_re.search(prev)
+                if not m2:
+                    continue
+                entry["body_bytes"] = int(m2.group(1))
+                entry["_body_bytes_line"] = line_no_0 - back + 1
+                break
 
         m = url_re.search(clean)
         if m:
             entry["url"] = m.group(1)
 
-        # 向上查找最近的 "Kiro request body:" 行（最多回溯 20 行）
         req_body = None
-        for back in range(1, min(21, line_no_0 + 1)):
-            prev_line = strip_ansi(lines[line_no_0 - back])
-            marker = "Kiro request body: "
-            idx = prev_line.find(marker)
-            if idx == -1:
+
+        body_re = re.compile(r"(?<![a-z_])request_body=")
+
+        # 1) 向下查找错误块中的 request_body=...（provider 往往把 headers/body 打到后续行）
+        for fwd in range(0, min(31, len(lines) - line_no_0)):
+            cand = strip_ansi(lines[line_no_0 + fwd])
+            match = body_re.search(cand)
+            if not match:
                 continue
-            brace = prev_line.find("{", idx + len(marker))
+            brace = cand.find("{", match.end())
             if brace == -1:
-                break
+                continue
             try:
-                req_body, _ = decoder.raw_decode(prev_line, brace)
+                req_body, _ = decoder.raw_decode(cand, brace)
             except json.JSONDecodeError:
-                # 截断的 JSON，做 partial 解析
                 entry["_req_body_partial"] = True
-                req_body = _partial_parse_request_body(prev_line[brace:], line_no_0 - back + 1)
-            entry["_req_body_line"] = line_no_0 - back + 1
+                req_body = _partial_parse_request_body(cand[brace:], line_no_0 + fwd + 1)
+            entry["_req_body_line"] = line_no_0 + fwd + 1
             break
+
+        # 2) 若未找到，再向上查找 handler DEBUG 的 "Kiro request body:"（最多回溯 20 行）
+        if req_body is None:
+            for back in range(1, min(21, line_no_0 + 1)):
+                prev_line = strip_ansi(lines[line_no_0 - back])
+                marker = "Kiro request body: "
+                idx = prev_line.find(marker)
+                if idx == -1:
+                    continue
+                brace = prev_line.find("{", idx + len(marker))
+                if brace == -1:
+                    break
+                try:
+                    req_body, _ = decoder.raw_decode(prev_line, brace)
+                except json.JSONDecodeError:
+                    entry["_req_body_partial"] = True
+                    req_body = _partial_parse_request_body(prev_line[brace:], line_no_0 - back + 1)
+                entry["_req_body_line"] = line_no_0 - back + 1
+                break
 
         if req_body and isinstance(req_body, dict):
             entry["_req_body"] = req_body
-            if not req_body.get("_partial"):
-                # 完整 JSON，做深度诊断
-                issues = find_issues(
-                    req_body,
-                    max_history_messages=100,
-                    large_payload_bytes=80_000,
-                    huge_payload_bytes=200_000,
-                )
-                entry["issues"] = issues
-                summary = summarize(req_body, entry.get("_req_body_line", 0))
-                entry["summary"] = summary
+            issues = find_issues(
+                req_body,
+                max_history_messages=max_history_messages,
+                large_payload_bytes=large_payload_bytes,
+                huge_payload_bytes=huge_payload_bytes,
+            )
+            # 基于实际请求体字节数的强信号（日志 JSON 可能被截断/脱敏，不适合用 json_len 判断大小）
+            body_bytes = entry.get("body_bytes")
+            if isinstance(body_bytes, int):
+                if body_bytes > huge_payload_bytes:
+                    issues.append("W_BODY_BYTES_HUGE")
+                elif body_bytes > large_payload_bytes:
+                    issues.append("W_BODY_BYTES_LARGE")
+            entry["issues"] = sorted(set(issues))
+            entry["summary"] = summarize(req_body, entry.get("_req_body_line", 0))
 
         results.append(entry)
 
     return results
+
+
+def _scan_local_rejects(log_text: str) -> List[Dict[str, Any]]:
+    """扫描本地请求体超限拒绝日志。"""
+    marker = "请求体超过安全阈值，拒绝发送"
+    results: List[Dict[str, Any]] = []
+    for line_no, raw in enumerate(log_text.splitlines(), 1):
+        if marker not in raw:
+            continue
+        clean = strip_ansi(raw)
+        kv = parse_kv(clean)
+        results.append(
+            {
+                "line_no": line_no,
+                "conversation_id": kv.get("conversation_id"),
+                "request_body_bytes": _safe_int(kv.get("request_body_bytes")),
+                "image_bytes": _safe_int(kv.get("image_bytes")),
+                "effective_bytes": _safe_int(kv.get("effective_bytes")),
+                "threshold": _safe_int(kv.get("threshold")),
+            }
+        )
+    return results
+
+
+def _safe_int(v: Optional[str]) -> Optional[int]:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        return None
 
 
 if __name__ == "__main__":

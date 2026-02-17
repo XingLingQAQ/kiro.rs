@@ -29,7 +29,8 @@ from typing import Any, Dict, List, Optional, Sequence
 # ANSI 清理（复用 diagnose_improper_request.py 的模式）
 # ---------------------------------------------------------------------------
 
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# 覆盖常见 CSI 序列（含少见的 ':' 参数分隔符），避免污染 URL/字段解析。
+ANSI_RE = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]")
 
 
 def strip_ansi(s: str) -> str:
@@ -135,6 +136,31 @@ class RejectionRecord:
 
 
 @dataclass
+class AdaptiveShrinkRecord:
+    """自适应二次压缩触发行的数据。"""
+    line_no: int
+    timestamp: Optional[str] = None
+    conversation_id: Optional[str] = None
+    initial_bytes: int = 0
+    final_bytes: int = 0
+    threshold: int = 0
+    iters: int = 0
+    additional_history_turns_removed: int = 0
+
+
+@dataclass
+class LocalRejectRecord:
+    """本地超限拒绝行的数据。"""
+    line_no: int
+    timestamp: Optional[str] = None
+    conversation_id: Optional[str] = None
+    request_body_bytes: int = 0
+    image_bytes: int = 0
+    effective_bytes: int = 0
+    threshold: int = 0
+
+
+@dataclass
 class MergedRequest:
     """关联后的完整请求记录。"""
     line_no: int = 0
@@ -169,6 +195,8 @@ MARKER_REQUEST = "Received POST /v1/messages request"
 MARKER_COMPRESSION = "输入压缩完成"
 MARKER_CONTEXT_USAGE = "收到 contextUsageEvent"
 MARKER_REJECTION = "上游拒绝请求：输入上下文过长"
+MARKER_ADAPTIVE_SHRINK = "请求体超过阈值，已执行自适应二次压缩"
+MARKER_LOCAL_REJECT = "请求体超过安全阈值，拒绝发送"
 
 # contextUsageEvent 格式：收到 contextUsageEvent: 67.2%, 计算 input_tokens: 12345
 CONTEXT_USAGE_RE = re.compile(
@@ -184,6 +212,8 @@ def parse_log(
 ) -> tuple[
     list[MergedRequest],
     list[RejectionRecord],
+    list[AdaptiveShrinkRecord],
+    list[LocalRejectRecord],
     int,
 ]:
     """
@@ -196,6 +226,8 @@ def parse_log(
     compressions: list[CompressionRecord] = []
     context_usages: list[ContextUsageRecord] = []
     rejections: list[RejectionRecord] = []
+    adaptive_shrinks: list[AdaptiveShrinkRecord] = []
+    local_rejects: list[LocalRejectRecord] = []
 
     model_re = re.compile(model_pattern, re.IGNORECASE) if model_pattern else None
 
@@ -255,10 +287,35 @@ def parse_log(
                 kiro_request_body_bytes=kv_int(kv, "kiro_request_body_bytes"),
             ))
 
+        elif MARKER_ADAPTIVE_SHRINK in line:
+            kv = parse_kv(line)
+            adaptive_shrinks.append(AdaptiveShrinkRecord(
+                line_no=line_no,
+                timestamp=extract_timestamp(line),
+                conversation_id=kv.get("conversation_id"),
+                initial_bytes=kv_int(kv, "initial_bytes"),
+                final_bytes=kv_int(kv, "final_bytes"),
+                threshold=kv_int(kv, "threshold"),
+                iters=kv_int(kv, "iters"),
+                additional_history_turns_removed=kv_int(kv, "additional_history_turns_removed"),
+            ))
+
+        elif MARKER_LOCAL_REJECT in line:
+            kv = parse_kv(line)
+            local_rejects.append(LocalRejectRecord(
+                line_no=line_no,
+                timestamp=extract_timestamp(line),
+                conversation_id=kv.get("conversation_id"),
+                request_body_bytes=kv_int(kv, "request_body_bytes"),
+                image_bytes=kv_int(kv, "image_bytes"),
+                effective_bytes=kv_int(kv, "effective_bytes"),
+                threshold=kv_int(kv, "threshold"),
+            ))
+
     # --- 关联请求行与压缩统计行 ---
     merged = _merge_records(requests, compressions, context_usages)
 
-    return merged, rejections, len(lines)
+    return merged, rejections, adaptive_shrinks, local_rejects, len(lines)
 
 
 def _merge_records(
@@ -371,6 +428,8 @@ def fmt_bytes(n: int) -> str:
 def generate_report(
     merged: list[MergedRequest],
     rejections: list[RejectionRecord],
+    adaptive_shrinks: list[AdaptiveShrinkRecord],
+    local_rejects: list[LocalRejectRecord],
     total_lines: int,
     *,
     top_n: int = 5,
@@ -455,6 +514,38 @@ def generate_report(
     w(f"输入过长拒绝: {len(rejections)} 次")
     w("")
 
+    # --- 自适应二次压缩 ---
+    w("--- 自适应二次压缩 ---")
+    w(f"触发次数: {len(adaptive_shrinks)}")
+    if adaptive_shrinks:
+        initial_avg = sum(r.initial_bytes for r in adaptive_shrinks) // len(adaptive_shrinks)
+        final_avg = sum(r.final_bytes for r in adaptive_shrinks) // len(adaptive_shrinks)
+        iters_avg = sum(r.iters for r in adaptive_shrinks) / len(adaptive_shrinks)
+        hist_avg = sum(r.additional_history_turns_removed for r in adaptive_shrinks) / len(adaptive_shrinks)
+        w(f"平均压缩前: {fmt_bytes(initial_avg)}")
+        w(f"平均压缩后: {fmt_bytes(final_avg)}")
+        w(f"平均迭代次数: {iters_avg:.1f}")
+        w(f"平均额外移除轮数: {hist_avg:.1f}")
+    w("")
+
+    # --- 本地拒绝（请求体超限） ---
+    w("--- 本地拒绝 (请求体超限) ---")
+    w(f"拒绝发送: {len(local_rejects)} 次")
+    if local_rejects:
+        top = sorted(local_rejects, key=lambda r: r.effective_bytes, reverse=True)[:5]
+        for r in top:
+            w(
+                "  line={line} effective={eff} threshold={th} body={body} image={img} conversationId={cid}".format(
+                    line=r.line_no,
+                    eff=r.effective_bytes,
+                    th=r.threshold,
+                    body=r.request_body_bytes,
+                    img=r.image_bytes,
+                    cid=r.conversation_id or "None",
+                )
+            )
+    w("")
+
     # --- 高压缩请求 TOP-N ---
     sorted_by_saved = sorted(with_comp, key=lambda r: r.bytes_saved_total, reverse=True)
     w(f"--- 高压缩请求 TOP-{top_n} ---")
@@ -495,6 +586,8 @@ def generate_report(
 def generate_json_report(
     merged: list[MergedRequest],
     rejections: list[RejectionRecord],
+    adaptive_shrinks: list[AdaptiveShrinkRecord],
+    local_rejects: list[LocalRejectRecord],
     total_lines: int,
 ) -> str:
     """生成 JSON 格式的汇总报告。"""
@@ -515,6 +608,8 @@ def generate_json_report(
             "history": sum(r.history_bytes_saved for r in with_comp),
         },
         "rejections": len(rejections),
+        "adaptive_shrinks": len(adaptive_shrinks),
+        "local_rejects": len(local_rejects),
     }
     return json.dumps(report, indent=2, ensure_ascii=False)
 
@@ -572,7 +667,7 @@ def main(argv: list[str]) -> int:
             return 2
 
     # 解析
-    merged, rejections, total_lines = parse_log(
+    merged, rejections, adaptive_shrinks, local_rejects, total_lines = parse_log(
         log_lines,
         min_tokens=args.min_tokens,
         model_pattern=args.model,
@@ -580,9 +675,9 @@ def main(argv: list[str]) -> int:
 
     # 输出
     if args.json:
-        print(generate_json_report(merged, rejections, total_lines))
+        print(generate_json_report(merged, rejections, adaptive_shrinks, local_rejects, total_lines))
     else:
-        print(generate_report(merged, rejections, total_lines, top_n=args.top))
+        print(generate_report(merged, rejections, adaptive_shrinks, local_rejects, total_lines, top_n=args.top))
 
     # CSV 导出
     if args.csv:

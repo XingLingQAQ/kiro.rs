@@ -24,3 +24,9 @@ data/
 /kiro_stats.json
 
 refs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

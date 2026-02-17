@@ -11,6 +11,12 @@
   - `process_image()` 对 GIF 格式强制重编码为静态帧，即使无需缩放也避免透传体积巨大的动图
   - `ImageProcessResult` 新增 `was_reencoded`、`original_bytes_len`、`final_bytes_len` 字段
 
+### Changed
+- **请求体大小阈值默认上调** (`src/model/config.rs`, `config.example.json`)
+  - 上游存在请求体大小硬限制（实测约 5MiB 左右会触发 400），默认将 `compression.maxRequestBodyBytes` 上调至 4.5MiB 预留安全余量
+- **日志分析脚本同步更新** (`tools/analyze_compression.py`, `tools/diagnose_improper_request.py`)
+  - 修复 ANSI 序列污染解析，并增加“自适应二次压缩/本地超限拒绝”的统计输出
+
 ## [v1.0.17] - 2026-02-15
 
 ### Added
@@ -61,11 +67,9 @@
 ## [v1.0.13] - 2026-02-14
 
 ### Fixed
-- **请求体大小预检扣除图片 base64 字节** (`src/anthropic/handlers.rs`)
+- **请求体大小预检输出 image_bytes 归因信息** (`src/anthropic/handlers.rs`)
   - 新增 `total_image_bytes()` 函数，计算 KiroRequest 中所有图片 base64 数据的总字节数
-  - 请求体大小阈值判断时扣除图片字节数，避免含图片的请求被误拒（图片在上游按像素块计 token，不应计入 body 大小阈值）
-  - 自适应压缩循环中每轮重新计算图片字节（历史截断可能移除含图片的消息）
-  - 错误提示信息增加 image_bytes 和 effective_bytes 字段，便于排查
+  - 错误提示信息增加 image_bytes 和 non-image bytes 字段，便于排查请求体大小归因
 
 ## [v1.0.12] - 2026-02-14
 
@@ -112,7 +116,7 @@
 
 ### Added
 - **请求体大小预检** (`src/anthropic/handlers.rs`, `src/model/config.rs`)
-  - 新增 `max_request_body_bytes` 配置项（默认 400KB），序列化后拦截超大请求避免无效上游往返
+  - 新增 `max_request_body_bytes` 配置项，序列化后拦截超大请求避免无效上游往返
   - `post_messages` 和 `post_messages_cc` 均支持预检
 
 ### Changed
@@ -206,7 +210,7 @@
 - **压缩统计日志改用字节单位** (`src/anthropic/handlers.rs`)
   - 移除不准确的 token 估算（`compressed_input_tokens`、`tokens_saved`），改为直接输出字节数
   - 字段重命名：`whitespace_saved` → `whitespace_bytes_saved` 等，明确单位语义
-  - 注释更新：说明字节统计用于排查上游 ~400KB 请求体限制
+  - 注释更新：说明字节统计用于排查上游请求体大小限制
 
 ### Added
 - **日志脱敏工具模块** (`src/common/redact.rs`)
@@ -296,7 +300,7 @@
 
 ### Added
 - **输入压缩管道** (`src/anthropic/compressor.rs`)
-  - 新增 5 层压缩管道，规避 Kiro 上游 ~400KB 请求体大小限制
+  - 新增 5 层压缩管道，规避 Kiro 上游请求体大小限制
   - 空白压缩：连续空行(3+)→2行，行尾空格移除，保留行首缩进
   - thinking 块处理：支持 discard/truncate/keep 三种策略
   - tool_result 智能截断：按行截断保留头尾，行数不足时回退字符级截断
