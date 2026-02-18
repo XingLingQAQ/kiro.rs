@@ -1,6 +1,19 @@
 # Changelog
 
+## [v1.1.1] - 2026-02-18
+
+### Fixed
+- **修复 Sonnet 4.6 thinking 配置变量名错误** (`src/anthropic/handlers.rs`)
+  - 修正 thinking 配置覆写逻辑中的变量名拼写错误
+
 ## [v1.1.0] - 2026-02-18
+
+### Added
+- **Sonnet 4.6 模型支持** (`src/anthropic/handlers.rs`, `src/anthropic/converter.rs`, `src/anthropic/types.rs`)
+  - 添加 claude-sonnet-4-6 及其 thinking/agentic 变体到模型列表
+  - 更新模型映射逻辑以正确识别 Sonnet 4.6 版本
+  - 为 Sonnet 4.6 启用 1M 上下文窗口和 64K 最大输出 tokens
+  - 更新 thinking 配置覆写逻辑以支持 Sonnet 4.6 的 adaptive thinking
 
 ## [v1.0.21] - 2026-02-17
 
