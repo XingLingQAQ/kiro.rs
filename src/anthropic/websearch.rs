@@ -308,12 +308,16 @@ fn generate_websearch_events(
             .results
             .iter()
             .map(|r| {
+                let page_age = r.published_date.and_then(|ms| {
+                    chrono::DateTime::from_timestamp_millis(ms)
+                        .map(|dt| dt.format("%B %-d, %Y").to_string())
+                });
                 json!({
                     "type": "web_search_result",
                     "title": r.title,
                     "url": r.url,
                     "encrypted_content": r.snippet.clone().unwrap_or_default(),
-                    "page_age": null
+                    "page_age": page_age
                 })
             })
             .collect::<Vec<_>>()
