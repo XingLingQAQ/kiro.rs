@@ -24,11 +24,6 @@ pub struct Config {
     #[serde(default = "default_region")]
     pub region: String,
 
-    /// Auth Region（用于 Token 刷新），未配置时回退到 region
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_region: Option<String>,
-
     /// API Region（用于 API 请求），未配置时回退到 region
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,7 +276,6 @@ impl Default for Config {
             host: default_host(),
             port: default_port(),
             region: default_region(),
-            auth_region: None,
             api_region: None,
             kiro_version: default_kiro_version(),
             machine_id: None,
@@ -308,13 +302,6 @@ impl Config {
     /// 获取默认配置文件路径
     pub fn default_config_path() -> &'static str {
         "config.json"
-    }
-
-    /// 获取有效的 Auth Region（用于 Token 刷新）
-    /// 优先使用 auth_region，未配置时回退到 region
-    #[allow(dead_code)]
-    pub fn effective_auth_region(&self) -> &str {
-        self.auth_region.as_deref().unwrap_or(&self.region)
     }
 
     /// 获取有效的 API Region（用于 API 请求）

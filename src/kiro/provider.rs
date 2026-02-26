@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::common::utf8::floor_char_boundary;
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::machine_id;
+use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::{CallContext, MultiTokenManager};
 
 /// 每个凭据的最大重试次数
@@ -103,27 +104,27 @@ impl KiroProvider {
         &self.token_manager
     }
 
-    /// 获取 API 基础 URL（使用 effective_api_region）
-    pub fn base_url(&self) -> String {
+    /// 获取 API 基础 URL（使用凭据级 effective_api_region）
+    fn base_url(&self, credentials: &KiroCredentials) -> String {
         format!(
             "https://q.{}.amazonaws.com/generateAssistantResponse",
-            self.token_manager.config().effective_api_region()
+            credentials.effective_api_region(self.token_manager.config())
         )
     }
 
-    /// 获取 MCP API URL（使用 effective_api_region）
-    pub fn mcp_url(&self) -> String {
+    /// 获取 MCP API URL（使用凭据级 effective_api_region）
+    fn mcp_url(&self, credentials: &KiroCredentials) -> String {
         format!(
             "https://q.{}.amazonaws.com/mcp",
-            self.token_manager.config().effective_api_region()
+            credentials.effective_api_region(self.token_manager.config())
         )
     }
 
-    /// 获取 API 基础域名（使用 effective_api_region）
-    pub fn base_domain(&self) -> String {
+    /// 获取 API 基础域名（使用凭据级 effective_api_region）
+    fn base_domain(&self, credentials: &KiroCredentials) -> String {
         format!(
             "q.{}.amazonaws.com",
-            self.token_manager.config().effective_api_region()
+            credentials.effective_api_region(self.token_manager.config())
         )
     }
 
@@ -189,7 +190,10 @@ impl KiroProvider {
             reqwest::header::USER_AGENT,
             HeaderValue::from_str(&user_agent)?,
         );
-        headers.insert(HOST, HeaderValue::from_str(&self.base_domain())?);
+        headers.insert(
+            HOST,
+            HeaderValue::from_str(&self.base_domain(&ctx.credentials))?,
+        );
         headers.insert(
             "amz-sdk-invocation-id",
             HeaderValue::from_str(&Uuid::new_v4().to_string())?,
@@ -234,7 +238,10 @@ impl KiroProvider {
             HeaderValue::from_str(&x_amz_user_agent)?,
         );
         headers.insert("user-agent", HeaderValue::from_str(&user_agent)?);
-        headers.insert("host", HeaderValue::from_str(&self.base_domain())?);
+        headers.insert(
+            "host",
+            HeaderValue::from_str(&self.base_domain(&ctx.credentials))?,
+        );
 
         headers.insert(
             "amz-sdk-invocation-id",
@@ -325,7 +332,7 @@ impl KiroProvider {
                 }
             };
 
-            let url = self.mcp_url();
+            let url = self.mcp_url(&ctx.credentials);
             let headers = match self.build_mcp_headers(&ctx) {
                 Ok(h) => h,
                 Err(e) => {
@@ -538,7 +545,7 @@ impl KiroProvider {
                 }
             };
 
-            let url = self.base_url();
+            let url = self.base_url(&ctx.credentials);
             let headers = match self.build_headers(&ctx) {
                 Ok(h) => h,
                 Err(e) => {
@@ -1107,9 +1114,13 @@ mod tests {
     fn test_base_url() {
         let config = Config::default();
         let credentials = KiroCredentials::default();
-        let provider = create_test_provider(config, credentials);
-        assert!(provider.base_url().contains("amazonaws.com"));
-        assert!(provider.base_url().contains("generateAssistantResponse"));
+        let provider = create_test_provider(config, credentials.clone());
+        assert!(provider.base_url(&credentials).contains("amazonaws.com"));
+        assert!(
+            provider
+                .base_url(&credentials)
+                .contains("generateAssistantResponse")
+        );
     }
 
     #[test]
@@ -1117,8 +1128,11 @@ mod tests {
         let mut config = Config::default();
         config.region = "us-east-1".to_string();
         let credentials = KiroCredentials::default();
-        let provider = create_test_provider(config, credentials);
-        assert_eq!(provider.base_domain(), "q.us-east-1.amazonaws.com");
+        let provider = create_test_provider(config, credentials.clone());
+        assert_eq!(
+            provider.base_domain(&credentials),
+            "q.us-east-1.amazonaws.com"
+        );
     }
 
     #[test]

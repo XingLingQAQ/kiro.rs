@@ -51,16 +51,14 @@ pub struct KiroCredentials {
     #[serde(skip_serializing_if = "is_zero")]
     pub priority: u32,
 
-    /// 凭据级 Region 配置（用于 OIDC token 刷新）
+    /// 凭据级 Region 配置（用于 Token 刷新及 API 请求默认值）
     /// 未配置时回退到 config.json 的全局 region
+    /// 兼容旧配置中的 authRegion 字段
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "authRegion")]
     pub region: Option<String>,
 
-    /// 凭据级 Auth Region（用于 Token 刷新）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_region: Option<String>,
-
-    /// 凭据级 API Region（用于 API 请求）
+    /// 凭据级 API Region（用于 API 请求，可单独覆盖 region）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_region: Option<String>,
 
@@ -205,13 +203,12 @@ impl KiroCredentials {
     }
 
     /// 获取有效的 Auth Region（用于 Token 刷新）
-    /// 优先级：凭据.auth_region > 凭据.region > config.auth_region > config.region
+    /// 优先级：凭据.region > config.region
     pub fn effective_auth_region<'a>(&'a self, config: &'a Config) -> &'a str {
-        self.auth_region
+        self.region
             .as_deref()
             .filter(|s| !s.trim().is_empty())
-            .or_else(|| self.region.as_deref().filter(|s| !s.trim().is_empty()))
-            .unwrap_or(config.effective_auth_region())
+            .unwrap_or(&config.region)
     }
 
     /// 获取有效的 API Region（用于 API 请求和额度查询）
@@ -341,7 +338,6 @@ mod tests {
             client_secret: None,
             priority: 0,
             region: None,
-            auth_region: None,
             api_region: None,
             machine_id: None,
             email: None,
@@ -459,7 +455,6 @@ mod tests {
             client_secret: None,
             priority: 0,
             region: Some("eu-west-1".to_string()),
-            auth_region: None,
             api_region: None,
             machine_id: None,
             email: None,
@@ -489,7 +484,6 @@ mod tests {
             client_secret: None,
             priority: 0,
             region: None,
-            auth_region: None,
             api_region: None,
             machine_id: None,
             email: None,
@@ -605,7 +599,6 @@ mod tests {
             client_secret: None,
             priority: 3,
             region: Some("us-west-2".to_string()),
-            auth_region: None,
             api_region: None,
             machine_id: Some("c".repeat(64)),
             email: None,
@@ -627,18 +620,7 @@ mod tests {
         assert_eq!(parsed.machine_id, original.machine_id);
     }
 
-    // ============ auth_region / api_region 字段测试 ============
-
-    #[test]
-    fn test_auth_region_field_parsing() {
-        let json = r#"{
-            "refreshToken": "test_refresh",
-            "authRegion": "eu-central-1"
-        }"#;
-        let creds = KiroCredentials::from_json(json).unwrap();
-        assert_eq!(creds.auth_region, Some("eu-central-1".to_string()));
-        assert_eq!(creds.api_region, None);
-    }
+    // ============ api_region 字段测试 ============
 
     #[test]
     fn test_api_region_field_parsing() {
@@ -648,45 +630,38 @@ mod tests {
         }"#;
         let creds = KiroCredentials::from_json(json).unwrap();
         assert_eq!(creds.api_region, Some("ap-southeast-1".to_string()));
-        assert_eq!(creds.auth_region, None);
     }
 
     #[test]
-    fn test_auth_api_region_serialization() {
+    fn test_api_region_serialization() {
         let creds = KiroCredentials {
             refresh_token: Some("test".to_string()),
-            auth_region: Some("eu-west-1".to_string()),
             api_region: Some("us-west-2".to_string()),
             ..Default::default()
         };
 
         let json = creds.to_pretty_json().unwrap();
-        assert!(json.contains("authRegion"));
-        assert!(json.contains("eu-west-1"));
         assert!(json.contains("apiRegion"));
         assert!(json.contains("us-west-2"));
     }
 
     #[test]
-    fn test_auth_api_region_none_not_serialized() {
+    fn test_api_region_none_not_serialized() {
         let creds = KiroCredentials {
             refresh_token: Some("test".to_string()),
-            auth_region: None,
             api_region: None,
             ..Default::default()
         };
 
         let json = creds.to_pretty_json().unwrap();
-        assert!(!json.contains("authRegion"));
         assert!(!json.contains("apiRegion"));
     }
 
     #[test]
-    fn test_auth_api_region_roundtrip() {
+    fn test_api_region_roundtrip() {
         let original = KiroCredentials {
             refresh_token: Some("refresh".to_string()),
             region: Some("us-east-1".to_string()),
-            auth_region: Some("eu-west-1".to_string()),
             api_region: Some("ap-northeast-1".to_string()),
             ..Default::default()
         };
@@ -695,73 +670,41 @@ mod tests {
         let parsed = KiroCredentials::from_json(&json).unwrap();
 
         assert_eq!(parsed.region, original.region);
-        assert_eq!(parsed.auth_region, original.auth_region);
         assert_eq!(parsed.api_region, original.api_region);
     }
 
     #[test]
-    fn test_backward_compat_no_auth_api_region() {
-        // 旧格式 JSON 不包含 authRegion/apiRegion，应正常解析
+    fn test_backward_compat_no_api_region() {
+        // 旧格式 JSON 不包含 apiRegion，应正常解析
         let json = r#"{
             "refreshToken": "test_refresh",
             "region": "us-east-1"
         }"#;
         let creds = KiroCredentials::from_json(json).unwrap();
         assert_eq!(creds.region, Some("us-east-1".to_string()));
-        assert_eq!(creds.auth_region, None);
         assert_eq!(creds.api_region, None);
     }
 
     // ============ effective_auth_region / effective_api_region 优先级测试 ============
 
     #[test]
-    fn test_effective_auth_region_credential_auth_region_highest() {
-        // 凭据.auth_region > 凭据.region > config.auth_region > config.region
+    fn test_effective_auth_region_credential_region_wins() {
+        // 凭据.region > config.region
         let mut config = Config::default();
         config.region = "config-region".to_string();
-        config.auth_region = Some("config-auth-region".to_string());
-
-        let creds = KiroCredentials {
-            region: Some("cred-region".to_string()),
-            auth_region: Some("cred-auth-region".to_string()),
-            ..Default::default()
-        };
-
-        assert_eq!(creds.effective_auth_region(&config), "cred-auth-region");
-    }
-
-    #[test]
-    fn test_effective_auth_region_fallback_to_credential_region() {
-        let mut config = Config::default();
-        config.region = "config-region".to_string();
-        config.auth_region = Some("config-auth-region".to_string());
 
         let creds = KiroCredentials {
             region: Some("cred-region".to_string()),
             ..Default::default()
         };
-        // auth_region 未设置
 
         assert_eq!(creds.effective_auth_region(&config), "cred-region");
-    }
-
-    #[test]
-    fn test_effective_auth_region_fallback_to_config_auth_region() {
-        let mut config = Config::default();
-        config.region = "config-region".to_string();
-        config.auth_region = Some("config-auth-region".to_string());
-
-        let creds = KiroCredentials::default();
-        // auth_region 和 region 均未设置
-
-        assert_eq!(creds.effective_auth_region(&config), "config-auth-region");
     }
 
     #[test]
     fn test_effective_auth_region_fallback_to_config_region() {
         let mut config = Config::default();
         config.region = "config-region".to_string();
-        // config.auth_region 未设置
 
         let creds = KiroCredentials::default();
 
@@ -770,17 +713,32 @@ mod tests {
 
     #[test]
     fn test_effective_api_region_credential_api_region_highest() {
-        // 凭据.api_region > config.api_region > config.region
+        // 凭据.api_region > 凭据.region > config.api_region > config.region
         let mut config = Config::default();
         config.region = "config-region".to_string();
         config.api_region = Some("config-api-region".to_string());
 
         let creds = KiroCredentials {
+            region: Some("cred-region".to_string()),
             api_region: Some("cred-api-region".to_string()),
             ..Default::default()
         };
 
         assert_eq!(creds.effective_api_region(&config), "cred-api-region");
+    }
+
+    #[test]
+    fn test_effective_api_region_fallback_to_credential_region() {
+        let mut config = Config::default();
+        config.region = "config-region".to_string();
+        config.api_region = Some("config-api-region".to_string());
+
+        let creds = KiroCredentials {
+            region: Some("cred-region".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(creds.effective_api_region(&config), "cred-region");
     }
 
     #[test]
@@ -805,33 +763,19 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_api_region_uses_credential_region() {
-        // 凭据.region 现在参与 api_region 的回退链（优先于 config）
-        let mut config = Config::default();
-        config.region = "config-region".to_string();
-
-        let creds = KiroCredentials {
-            region: Some("cred-region".to_string()),
-            ..Default::default()
-        };
-
-        assert_eq!(creds.effective_api_region(&config), "cred-region");
-    }
-
-    #[test]
-    fn test_auth_and_api_region_independent() {
-        // auth_region 和 api_region 互不影响
+    fn test_region_and_api_region_independent() {
+        // region 用于 auth，api_region 可单独覆盖 API 请求
         let mut config = Config::default();
         config.region = "default".to_string();
 
         let creds = KiroCredentials {
-            auth_region: Some("auth-only".to_string()),
-            api_region: Some("api-only".to_string()),
+            region: Some("eu-central-1".to_string()),
+            api_region: Some("us-east-1".to_string()),
             ..Default::default()
         };
 
-        assert_eq!(creds.effective_auth_region(&config), "auth-only");
-        assert_eq!(creds.effective_api_region(&config), "api-only");
+        assert_eq!(creds.effective_auth_region(&config), "eu-central-1");
+        assert_eq!(creds.effective_api_region(&config), "us-east-1");
     }
 
     // ============ 凭据级代理优先级测试 ============

@@ -563,6 +563,10 @@ pub struct CredentialEntrySnapshot {
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
+    /// 凭据级 Region（用于 Token 刷新）
+    pub region: Option<String>,
+    /// 凭据级 API Region（单独覆盖 API 请求）
+    pub api_region: Option<String>,
 }
 
 /// 凭据管理器状态快照
@@ -2157,6 +2161,8 @@ impl MultiTokenManager {
                         email: e.credentials.email.clone(),
                         success_count: e.success_count,
                         last_used_at: e.last_used_at.clone(),
+                        region: e.credentials.region.clone(),
+                        api_region: e.credentials.api_region.clone(),
                     }
                 })
                 .collect(),
@@ -2200,6 +2206,26 @@ impl MultiTokenManager {
             entry.credentials.priority = priority;
         }
         // 持久化更改
+        self.persist_credentials()?;
+        Ok(())
+    }
+
+    /// 设置凭据 Region（Admin API）
+    pub fn set_region(
+        &self,
+        id: u64,
+        region: Option<String>,
+        api_region: Option<String>,
+    ) -> anyhow::Result<()> {
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            entry.credentials.region = region;
+            entry.credentials.api_region = api_region;
+        }
         self.persist_credentials()?;
         Ok(())
     }
