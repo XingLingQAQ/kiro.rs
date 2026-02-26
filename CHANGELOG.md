@@ -6,6 +6,8 @@
 - **Kiro Account Manager 导入** — 支持导入 KAM 导出的 JSON 凭据文件 (`admin-ui/src/components/kam-import-dialog.tsx`)
 - **批量导入对话框** — 新增独立的批量导入凭据组件 (`admin-ui/src/components/batch-import-dialog.tsx`)
 - **凭证 disabled 字段持久化** — 从配置文件读取 disabled 状态，支持手动禁用凭据跨重启保留 (`src/kiro/model/credentials.rs`, `src/kiro/token_manager.rs`)
+- **凭据级 Region 编辑** — Admin UI 支持对已有凭据在线修改 `region` 和 `apiRegion`，点击凭据卡片内联编辑，保存后持久化 (`src/admin/`, `admin-ui/src/components/credential-card.tsx`)
+- **Admin API `POST /credentials/:id/region`** — 新增 Region 修改接口，支持清除（传 null）或覆盖两个 region 字段 (`src/admin/handlers.rs`, `src/admin/router.rs`)
 
 ### Fixed
 - **WebSearch SSE 事件序列修正** — 调整 server_tool_use 位置、content block index、page_age 转换、usage 统计 (`src/anthropic/websearch.rs`)
@@ -16,11 +18,22 @@
 - **防止自动禁用状态被持久化** — `persist_credentials()` 仅持久化手动禁用，避免重启后自动禁用变为手动禁用导致无法自愈 (`src/kiro/token_manager.rs`)
 - **sha256Hex digest 异常回退** — 在 `crypto.subtle.digest` 外围加 try/catch，失败时回退到纯 JS 实现 (`admin-ui/src/lib/utils.ts`)
 - **parseKamJson null 输入保护** — 对 JSON null 输入增加类型检查，避免 TypeError (`admin-ui/src/components/kam-import-dialog.tsx`)
+- **额度查询 region 修复** — `get_usage_limits` 改用 `effective_api_region`，凭据指定 region 时不再因走错 endpoint 而 403 (`src/kiro/token_manager.rs`)
+- **批量导入丢失 apiRegion** — `TokenJsonItem` 补充 `api_region` 字段，导入 JSON 中的 `apiRegion` 不再被丢弃 (`src/admin/types.rs`, `src/admin/service.rs`)
+- **API 请求使用凭据级 region** — `provider.rs` 的 `base_url`/`mcp_url`/`base_domain` 改用 `credentials.effective_api_region()`，凭据配置了 region 时不再错误地走全局 config region 导致 403 (`src/kiro/provider.rs`)
+- **Region 编辑 stale state** — 点击编辑 Region 时同步最新 props 到 input，避免后台刷新后提交旧值覆盖服务端数据 (`admin-ui/src/components/credential-card.tsx`)
+- **Region 值未 trim** — `set_region` 保存前对 region/apiRegion 做 trim，防止带空格的值持久化后生成无效 URL (`src/admin/service.rs`)
+- **过滤超长工具名** — `convert_tools` 过滤掉 name 超过 64 字符的工具，避免上游拒绝整个请求 (`src/anthropic/converter.rs`)
+- **429 错误不再输出完整请求体** — 瞬态上游错误（429/5xx）走独立分支返回 429，不触发 sensitive-logs 的请求体诊断日志 (`src/anthropic/handlers.rs`)
+- **兼容旧 authRegion 配置** — `credentials.region` 增加 `#[serde(alias = "authRegion")]`，旧配置文件中的 `authRegion` 字段不再被静默忽略 (`src/kiro/model/credentials.rs`)
+- **导入凭据 region 规范化** — token.json 导入路径对 region/apiRegion 做 trim + 空字符串转 None，与 `set_region` 逻辑一致 (`src/admin/service.rs`)
 
 ### Changed
 - **默认 kiro_version 更新至 0.10.0** (`src/model/config.rs`)
 - **Opus 模型映射调整** — opus 默认映射到 claude-opus-4.6，仅 4.5/4-5 显式映射到 claude-opus-4.5 (`src/anthropic/converter.rs`)
 - **Sonnet 4.6 Model 字段补全** — 添加 context_length、max_completion_tokens、thinking 字段 (`src/anthropic/handlers.rs`)
+- **Region 配置精简** — 删除 `credentials.auth_region` 和 `config.auth_region` 冗余字段；凭据的 `region` 同时用于 Token 刷新和 API 请求默认值，`api_region` 可单独覆盖 API 路由 (`src/kiro/model/credentials.rs`, `src/model/config.rs`)
+- **添加凭据 UI Region 字段语义调整** — 前端"Auth Region"改为"Region"（对应 `credentials.region`），"API Region"保持，去除无意义的 `authRegion` 前端字段 (`admin-ui/`)
 
 ## [v1.1.1] - 2026-02-18
 
