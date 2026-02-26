@@ -121,7 +121,9 @@ export interface AddCredentialRequest {
   clientId?: string
   clientSecret?: string
   priority?: number
-  authRegion?: string
+  /** Region（用于 Token 刷新及默认 API 请求），可被 apiRegion 单独覆盖 */
+  region?: string
+  /** 单独覆盖 API 请求使用的 region */
   apiRegion?: string
   machineId?: string
   proxyUrl?: string
