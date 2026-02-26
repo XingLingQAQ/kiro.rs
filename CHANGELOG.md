@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.1.2] - 2026-02-27
 
 ### Added
 - **Kiro Account Manager 导入** — 支持导入 KAM 导出的 JSON 凭据文件 (`admin-ui/src/components/kam-import-dialog.tsx`)
