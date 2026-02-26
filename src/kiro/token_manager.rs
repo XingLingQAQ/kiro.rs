@@ -396,7 +396,12 @@ pub(crate) async fn get_usage_limits(
 ) -> anyhow::Result<UsageLimitsResponse> {
     tracing::debug!("正在获取使用额度信息...");
 
-    let region = &config.region;
+    // 优先使用凭据级 region，fallback 到全局 config.region
+    let region = credentials
+        .region
+        .as_deref()
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or(&config.region);
     let host = format!("q.{}.amazonaws.com", region);
     let machine_id = machine_id::generate_from_credentials(credentials, config)
         .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
@@ -808,11 +813,19 @@ impl MultiTokenManager {
                 let refresh_token_hash = cred.refresh_token.as_deref().map(sha256_hex);
                 CredentialEntry {
                     id,
-                    credentials: cred,
+                    credentials: cred.clone(),
                     failure_count: 0,
-                    disabled: false,
-                    auto_heal_reason: None,
-                    disable_reason: None,
+                    disabled: cred.disabled, // 从配置文件读取 disabled 状态
+                    auto_heal_reason: if cred.disabled {
+                        Some(AutoHealReason::Manual)
+                    } else {
+                        None
+                    },
+                    disable_reason: if cred.disabled {
+                        Some(DisableReason::Manual)
+                    } else {
+                        None
+                    },
                     fingerprint,
                     success_count: 0,
                     last_used_at: None,
@@ -1659,6 +1672,9 @@ impl MultiTokenManager {
                 .map(|e| {
                     let mut cred = e.credentials.clone();
                     cred.canonicalize_auth_method();
+                    // 仅持久化手动禁用状态，自动禁用（失败阈值/额度用尽等）不落盘，
+                    // 避免重启后自动禁用被误标记为手动禁用导致无法自愈
+                    cred.disabled = e.disable_reason == Some(DisableReason::Manual);
                     cred
                 })
                 .collect();
@@ -2408,6 +2424,9 @@ impl MultiTokenManager {
 
         // 持久化更改
         self.persist_credentials()?;
+
+        // 立即回写统计数据，清除已删除凭据的残留条目
+        self.save_stats();
 
         tracing::info!("已删除凭据 #{}", id);
         Ok(())

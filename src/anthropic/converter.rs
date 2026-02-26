@@ -17,6 +17,80 @@ use super::types::{ContentBlock, MessagesRequest, Tool as AnthropicTool};
 use crate::anthropic::compressor::CompressionStats;
 use crate::model::config::CompressionConfig;
 
+/// 规范化 JSON Schema，修复 MCP 工具定义中常见的类型问题
+///
+/// Claude Code / MCP 工具定义偶尔会出现 `required: null`、`properties: null` 等，
+/// 导致上游返回 400 "Improperly formed request"。
+fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(mut obj) = schema else {
+        return serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+        });
+    };
+
+    // $schema（必须是非空字符串）
+    if !obj
+        .get("$schema")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+    {
+        obj.insert(
+            "$schema".to_string(),
+            serde_json::Value::String("http://json-schema.org/draft-07/schema#".to_string()),
+        );
+    }
+
+    // type（必须是字符串）
+    if !obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+    {
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String("object".to_string()),
+        );
+    }
+
+    // properties（必须是 object）
+    match obj.get("properties") {
+        Some(serde_json::Value::Object(_)) => {}
+        _ => {
+            obj.insert(
+                "properties".to_string(),
+                serde_json::Value::Object(serde_json::Map::new()),
+            );
+        }
+    }
+
+    // required（必须是 string 数组）
+    let required = match obj.remove("required") {
+        Some(serde_json::Value::Array(arr)) => serde_json::Value::Array(
+            arr.into_iter()
+                .filter_map(|v| v.as_str().map(|s| serde_json::Value::String(s.to_string())))
+                .collect(),
+        ),
+        _ => serde_json::Value::Array(Vec::new()),
+    };
+    obj.insert("required".to_string(), required);
+
+    // additionalProperties（允许 bool 或 object，其他按 true 处理）
+    match obj.get("additionalProperties") {
+        Some(serde_json::Value::Bool(_)) | Some(serde_json::Value::Object(_)) => {}
+        _ => {
+            obj.insert(
+                "additionalProperties".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+    }
+
+    serde_json::Value::Object(obj)
+}
+
 /// 追加到 Write 工具 description 末尾的内容
 const WRITE_TOOL_DESCRIPTION_SUFFIX: &str = "- IMPORTANT: If the content to write exceeds 150 lines, you MUST only write the first 50 lines using this tool, then use `Edit` tool to append the remaining content in chunks of no more than 50 lines each. If needed, leave a unique placeholder to help append content. Do NOT attempt to write all content at once.";
 
@@ -53,16 +127,6 @@ fn non_empty_content_or_space(content: String, has_non_text_payload: bool) -> St
     content
 }
 
-fn default_json_schema() -> serde_json::Value {
-    serde_json::json!({
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "type": "object",
-        "properties": {},
-        "required": [],
-        "additionalProperties": true
-    })
-}
-
 /// 统计单个消息内容中的图片数量
 fn count_images_in_content(content: &serde_json::Value) -> usize {
     match content {
@@ -74,67 +138,11 @@ fn count_images_in_content(content: &serde_json::Value) -> usize {
     }
 }
 
-fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
-    let serde_json::Value::Object(mut obj) = schema else {
-        return default_json_schema();
-    };
-
-    // 关键点：上游会校验 JSON Schema 的字段类型（例如 required 必须是数组）。
-    // Claude Code / MCP 工具定义里偶尔会出现 `required: null` / `properties: null`，
-    // 这会导致上游返回 400 "Improperly formed request"。
-
-    // $schema
-    let schema_uri = obj
-        .get("$schema")
-        .and_then(|v| v.as_str())
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or("http://json-schema.org/draft-07/schema#")
-        .to_string();
-    obj.insert("$schema".to_string(), serde_json::Value::String(schema_uri));
-
-    // type
-    let ty = obj
-        .get("type")
-        .and_then(|v| v.as_str())
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or("object")
-        .to_string();
-    obj.insert("type".to_string(), serde_json::Value::String(ty));
-
-    // properties（必须是 object）
-    let properties = match obj.remove("properties") {
-        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
-        _ => serde_json::Value::Object(serde_json::Map::new()),
-    };
-    obj.insert("properties".to_string(), properties);
-
-    // required（必须是 string 数组）
-    let required = match obj.remove("required") {
-        Some(serde_json::Value::Array(arr)) => serde_json::Value::Array(
-            arr.into_iter()
-                .filter_map(|v| v.as_str().map(|s| serde_json::Value::String(s.to_string())))
-                .collect(),
-        ),
-        _ => serde_json::Value::Array(Vec::new()),
-    };
-    obj.insert("required".to_string(), required);
-
-    // additionalProperties（允许 bool 或 schema object；其他类型按 true 处理）
-    let additional_properties = match obj.remove("additionalProperties") {
-        Some(serde_json::Value::Bool(b)) => serde_json::Value::Bool(b),
-        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
-        _ => serde_json::Value::Bool(true),
-    };
-    obj.insert("additionalProperties".to_string(), additional_properties);
-
-    serde_json::Value::Object(obj)
-}
-
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
 ///
 /// 映射规则：
 /// - sonnet 且包含 4.6/4-6 → claude-sonnet-4.6，否则 → claude-sonnet-4.5
-/// - opus 且包含 4.6/4-6 → claude-opus-4.6，否则 → claude-opus-4.5
+/// - opus 且包含 4.5/4-5 → claude-opus-4.5，否则 → claude-opus-4.6
 /// - 所有 haiku → claude-haiku-4.5
 /// - `-agentic` 后缀会被剥离后再映射
 pub fn map_model(model: &str) -> Option<String> {
@@ -149,10 +157,10 @@ pub fn map_model(model: &str) -> Option<String> {
             Some("claude-sonnet-4.5".to_string())
         }
     } else if model_lower.contains("opus") {
-        if model_lower.contains("4-6") || model_lower.contains("4.6") {
-            Some("claude-opus-4.6".to_string())
-        } else {
+        if model_lower.contains("4-5") || model_lower.contains("4.5") {
             Some("claude-opus-4.5".to_string())
+        } else {
+            Some("claude-opus-4.6".to_string())
         }
     } else if model_lower.contains("haiku") {
         Some("claude-haiku-4.5".to_string())

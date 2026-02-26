@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Kiro Account Manager 导入** — 支持导入 KAM 导出的 JSON 凭据文件 (`admin-ui/src/components/kam-import-dialog.tsx`)
+- **批量导入对话框** — 新增独立的批量导入凭据组件 (`admin-ui/src/components/batch-import-dialog.tsx`)
+- **凭证 disabled 字段持久化** — 从配置文件读取 disabled 状态，支持手动禁用凭据跨重启保留 (`src/kiro/model/credentials.rs`, `src/kiro/token_manager.rs`)
+
+### Fixed
+- **WebSearch SSE 事件序列修正** — 调整 server_tool_use 位置、content block index、page_age 转换、usage 统计 (`src/anthropic/websearch.rs`)
+- **Token Manager 统计回写** — 立即回写统计数据，清除已删除凭据残留 (`src/kiro/token_manager.rs`)
+- **HTTP 非安全地址批量导入** — 修复 admin-ui 在 HTTP 下的导入错误 (`admin-ui/src/lib/utils.ts`)
+- **Docker 端口绑定优化** — 修正端口绑定和配置目录挂载 (`docker-compose.yml`)
+- **移除重复 Sonnet 4.6 模型项** — 删除 `/v1/models` 中重复的 claude-sonnet-4-6 条目，避免 id 冲突 (`src/anthropic/handlers.rs`)
+- **防止自动禁用状态被持久化** — `persist_credentials()` 仅持久化手动禁用，避免重启后自动禁用变为手动禁用导致无法自愈 (`src/kiro/token_manager.rs`)
+- **sha256Hex digest 异常回退** — 在 `crypto.subtle.digest` 外围加 try/catch，失败时回退到纯 JS 实现 (`admin-ui/src/lib/utils.ts`)
+- **parseKamJson null 输入保护** — 对 JSON null 输入增加类型检查，避免 TypeError (`admin-ui/src/components/kam-import-dialog.tsx`)
+
+### Changed
+- **默认 kiro_version 更新至 0.10.0** (`src/model/config.rs`)
+- **Opus 模型映射调整** — opus 默认映射到 claude-opus-4.6，仅 4.5/4-5 显式映射到 claude-opus-4.5 (`src/anthropic/converter.rs`)
+- **Sonnet 4.6 Model 字段补全** — 添加 context_length、max_completion_tokens、thinking 字段 (`src/anthropic/handlers.rs`)
+
 ## [v1.1.1] - 2026-02-18
 
 ### Fixed
