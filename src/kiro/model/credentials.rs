@@ -209,15 +209,18 @@ impl KiroCredentials {
     pub fn effective_auth_region<'a>(&'a self, config: &'a Config) -> &'a str {
         self.auth_region
             .as_deref()
-            .or(self.region.as_deref())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| self.region.as_deref().filter(|s| !s.trim().is_empty()))
             .unwrap_or(config.effective_auth_region())
     }
 
-    /// 获取有效的 API Region（用于 API 请求）
-    /// 优先级：凭据.api_region > config.api_region > config.region
+    /// 获取有效的 API Region（用于 API 请求和额度查询）
+    /// 优先级：凭据.api_region > 凭据.region > config.api_region > config.region
     pub fn effective_api_region<'a>(&'a self, config: &'a Config) -> &'a str {
         self.api_region
             .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| self.region.as_deref().filter(|s| !s.trim().is_empty()))
             .unwrap_or(config.effective_api_region())
     }
 
@@ -802,8 +805,8 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_api_region_ignores_credential_region() {
-        // 凭据.region 不参与 api_region 的回退链
+    fn test_effective_api_region_uses_credential_region() {
+        // 凭据.region 现在参与 api_region 的回退链（优先于 config）
         let mut config = Config::default();
         config.region = "config-region".to_string();
 
@@ -812,7 +815,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(creds.effective_api_region(&config), "config-region");
+        assert_eq!(creds.effective_api_region(&config), "cred-region");
     }
 
     #[test]

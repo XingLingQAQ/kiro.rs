@@ -396,12 +396,8 @@ pub(crate) async fn get_usage_limits(
 ) -> anyhow::Result<UsageLimitsResponse> {
     tracing::debug!("正在获取使用额度信息...");
 
-    // 优先使用凭据级 region，fallback 到全局 config.region
-    let region = credentials
-        .region
-        .as_deref()
-        .filter(|r| !r.trim().is_empty())
-        .unwrap_or(&config.region);
+    // 优先级：凭据.api_region > 凭据.region > config.api_region > config.region
+    let region = credentials.effective_api_region(config);
     let host = format!("q.{}.amazonaws.com", region);
     let machine_id = machine_id::generate_from_credentials(credentials, config)
         .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
