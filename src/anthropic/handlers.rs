@@ -57,6 +57,17 @@ fn is_quota_exhausted_error(err: &Error) -> bool {
     s.contains("所有凭据已用尽")
 }
 
+fn is_transient_upstream_error(err: &Error) -> bool {
+    let s = err.to_string();
+    s.contains("429 Too Many Requests")
+        || s.contains("INSUFFICIENT_MODEL_CAPACITY")
+        || s.contains("high traffic")
+        || s.contains("408 Request Timeout")
+        || s.contains("502 Bad Gateway")
+        || s.contains("503 Service Unavailable")
+        || s.contains("504 Gateway Timeout")
+}
+
 fn is_improperly_formed_request_error(err: &Error) -> bool {
     let s = err.to_string();
     s.contains("Improperly formed request")
@@ -328,6 +339,15 @@ fn map_kiro_provider_error_to_response(request_body: &str, err: Error) -> Respon
                 "rate_limit_error",
                 "All credentials quota exhausted. Please wait for quota reset or add new credentials.",
             )),
+        )
+            .into_response();
+    }
+
+    if is_transient_upstream_error(&err) {
+        tracing::warn!(error = %err, "上游瞬态错误（429/5xx），不输出请求体");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse::new("rate_limit_error", &err.to_string())),
         )
             .into_response();
     }

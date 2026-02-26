@@ -787,6 +787,17 @@ fn convert_tools(
             if dominated {
                 tracing::debug!("过滤不支持的工具: name={}, type={:?}", t.name, t.tool_type);
             }
+
+            // 过滤掉 name 超过 64 字符的工具（上游硬限制）
+            if t.name.len() > 64 {
+                tracing::warn!(
+                    "过滤工具名过长的工具: name={} ({}字符，上限64)",
+                    t.name,
+                    t.name.len()
+                );
+                return false;
+            }
+
             !dominated
         })
         .map(|t| {
