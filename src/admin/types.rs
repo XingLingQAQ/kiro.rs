@@ -42,6 +42,10 @@ pub struct CredentialStatusItem {
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
+    /// 凭据级 Region（用于 Token 刷新）
+    pub region: Option<String>,
+    /// 凭据级 API Region（单独覆盖 API 请求）
+    pub api_region: Option<String>,
 }
 
 // ============ 操作请求 ============
@@ -60,6 +64,16 @@ pub struct SetDisabledRequest {
 pub struct SetPriorityRequest {
     /// 新优先级值
     pub priority: u32,
+}
+
+/// 修改 Region 请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRegionRequest {
+    /// 凭据级 Region（用于 Token 刷新），空字符串表示清除
+    pub region: Option<String>,
+    /// 凭据级 API Region（单独覆盖 API 请求），空字符串表示清除
+    pub api_region: Option<String>,
 }
 
 /// 添加凭据请求
@@ -83,12 +97,9 @@ pub struct AddCredentialRequest {
     #[serde(default)]
     pub priority: u32,
 
-    /// 凭据级 Region 配置（用于 OIDC token 刷新）
+    /// 凭据级 Region 配置（用于 Token 刷新）
     /// 未配置时回退到 config.json 的全局 region
     pub region: Option<String>,
-
-    /// 凭据级 Auth Region（用于 Token 刷新）
-    pub auth_region: Option<String>,
 
     /// 凭据级 API Region（用于 API 调用）
     pub api_region: Option<String>,
@@ -221,6 +232,7 @@ pub struct TokenJsonItem {
     #[serde(default)]
     pub priority: u32,
     pub region: Option<String>,
+    pub api_region: Option<String>,
     pub machine_id: Option<String>,
 }
 

@@ -4,6 +4,7 @@ import {
   deleteCredential,
   setCredentialDisabled,
   setCredentialPriority,
+  setCredentialRegion,
   resetCredentialFailure,
   getCredentialBalance,
   getCachedBalances,
@@ -89,6 +90,18 @@ export function useSetPriority() {
   return useMutation({
     mutationFn: ({ id, priority }: { id: number; priority: number }) =>
       setCredentialPriority(id, priority),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 设置 Region
+export function useSetRegion() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, region, apiRegion }: { id: number; region: string | null; apiRegion: string | null }) =>
+      setCredentialRegion(id, region, apiRegion),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

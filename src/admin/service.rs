@@ -75,6 +75,8 @@ impl AdminService {
                 email: entry.email,
                 success_count: entry.success_count,
                 last_used_at: entry.last_used_at.clone(),
+                region: entry.region,
+                api_region: entry.api_region,
             })
             .collect();
 
@@ -99,6 +101,25 @@ impl AdminService {
     pub fn set_priority(&self, id: u64, priority: u32) -> Result<(), AdminServiceError> {
         self.token_manager
             .set_priority(id, priority)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 设置凭据 Region
+    pub fn set_region(
+        &self,
+        id: u64,
+        region: Option<String>,
+        api_region: Option<String>,
+    ) -> Result<(), AdminServiceError> {
+        // trim 后空字符串转 None
+        let region = region
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let api_region = api_region
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        self.token_manager
+            .set_region(id, region, api_region)
             .map_err(|e| self.classify_error(e, id))
     }
 
@@ -208,7 +229,6 @@ impl AdminService {
             client_secret: req.client_secret,
             priority: req.priority,
             region: req.region,
-            auth_region: req.auth_region,
             api_region: req.api_region,
             machine_id: req.machine_id,
             email: req.email,
@@ -525,7 +545,15 @@ impl AdminService {
             };
         }
 
-        // 实际添加凭据
+        // 实际添加凭据（trim + 空字符串转 None，与 set_region 逻辑一致）
+        let region = item
+            .region
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let api_region = item
+            .api_region
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let new_cred = KiroCredentials {
             id: None,
             access_token: None,
@@ -536,9 +564,8 @@ impl AdminService {
             client_id: item.client_id,
             client_secret: item.client_secret,
             priority: item.priority,
-            region: item.region,
-            auth_region: None,
-            api_region: None,
+            region,
+            api_region,
             machine_id: item.machine_id,
             email: None,
             subscription_title: None,

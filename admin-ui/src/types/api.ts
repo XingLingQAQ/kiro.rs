@@ -34,6 +34,10 @@ export interface CredentialStatusItem {
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
+  /** 凭据级 Region（用于 Token 刷新） */
+  region: string | null
+  /** 凭据级 API Region（单独覆盖 API 请求） */
+  apiRegion: string | null
 }
 
 // 余额响应

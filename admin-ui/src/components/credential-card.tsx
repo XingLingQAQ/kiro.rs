@@ -19,6 +19,7 @@ import type { CredentialStatusItem, CachedBalanceInfo, BalanceResponse } from '@
 import {
   useSetDisabled,
   useSetPriority,
+  useSetRegion,
   useResetFailure,
   useDeleteCredential,
 } from '@/hooks/use-credentials'
@@ -60,10 +61,14 @@ export function CredentialCard({
 }: CredentialCardProps) {
   const [editingPriority, setEditingPriority] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
+  const [editingRegion, setEditingRegion] = useState(false)
+  const [regionValue, setRegionValue] = useState(credential.region ?? '')
+  const [apiRegionValue, setApiRegionValue] = useState(credential.apiRegion ?? '')
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
 
   const setDisabled = useSetDisabled()
   const setPriority = useSetPriority()
+  const setRegion = useSetRegion()
   const resetFailure = useResetFailure()
   const deleteCredential = useDeleteCredential()
 
@@ -93,6 +98,25 @@ export function CredentialCard({
         onSuccess: (res) => {
           toast.success(res.message)
           setEditingPriority(false)
+        },
+        onError: (err) => {
+          toast.error('操作失败: ' + (err as Error).message)
+        },
+      }
+    )
+  }
+
+  const handleRegionChange = () => {
+    setRegion.mutate(
+      {
+        id: credential.id,
+        region: regionValue.trim() || null,
+        apiRegion: apiRegionValue.trim() || null,
+      },
+      {
+        onSuccess: (res) => {
+          toast.success(res.message)
+          setEditingRegion(false)
         },
         onError: (err) => {
           toast.error('操作失败: ' + (err as Error).message)
@@ -286,6 +310,64 @@ export function CredentialCard({
                 <span className="font-medium">{credential.proxyUrl}</span>
               </div>
             )}
+            {/* Region 配置 */}
+            <div className="col-span-2">
+              <span className="text-muted-foreground">Region：</span>
+              {editingRegion ? (
+                <div className="inline-flex items-center gap-1 ml-1 flex-wrap">
+                  <Input
+                    placeholder="Region（留空清除）"
+                    value={regionValue}
+                    onChange={(e) => setRegionValue(e.target.value)}
+                    className="w-32 h-7 text-sm"
+                  />
+                  <Input
+                    placeholder="API Region（可选）"
+                    value={apiRegionValue}
+                    onChange={(e) => setApiRegionValue(e.target.value)}
+                    className="w-36 h-7 text-sm"
+                  />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 w-7 p-0"
+                    onClick={handleRegionChange}
+                    disabled={setRegion.isPending}
+                  >
+                    ✓
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 w-7 p-0"
+                    onClick={() => {
+                      setEditingRegion(false)
+                      setRegionValue(credential.region ?? '')
+                      setApiRegionValue(credential.apiRegion ?? '')
+                    }}
+                  >
+                    ✕
+                  </Button>
+                </div>
+              ) : (
+                <span
+                  className="font-medium cursor-pointer hover:underline ml-1"
+                  onClick={() => {
+                    setRegionValue(credential.region ?? '')
+                    setApiRegionValue(credential.apiRegion ?? '')
+                    setEditingRegion(true)
+                  }}
+                >
+                  {credential.region || '全局默认'}
+                  {credential.apiRegion && (
+                    <span className="text-muted-foreground ml-1">
+                      / API: {credential.apiRegion}
+                    </span>
+                  )}
+                  <span className="text-xs text-muted-foreground ml-1">(点击编辑)</span>
+                </span>
+              )}
+            </div>
             {credential.hasProfileArn && (
               <div className="col-span-2">
                 <Badge variant="secondary">有 Profile ARN</Badge>

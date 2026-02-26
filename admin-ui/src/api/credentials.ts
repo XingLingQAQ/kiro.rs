@@ -70,6 +70,19 @@ export async function resetCredentialFailure(
   return data
 }
 
+// 设置凭据 Region
+export async function setCredentialRegion(
+  id: number,
+  region: string | null,
+  apiRegion: string | null
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/region`, {
+    region: region || null,
+    apiRegion: apiRegion || null,
+  })
+  return data
+}
+
 // 获取凭据余额
 export async function getCredentialBalance(id: number): Promise<BalanceResponse> {
   const { data } = await api.get<BalanceResponse>(`/credentials/${id}/balance`)

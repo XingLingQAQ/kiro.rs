@@ -10,7 +10,7 @@ use super::{
     middleware::AdminState,
     types::{
         AddCredentialRequest, ImportTokenJsonRequest, SetDisabledRequest,
-        SetLoadBalancingModeRequest, SetPriorityRequest, SuccessResponse,
+        SetLoadBalancingModeRequest, SetPriorityRequest, SetRegionRequest, SuccessResponse,
     },
 };
 
@@ -50,6 +50,22 @@ pub async fn set_credential_priority(
             id, payload.priority
         )))
         .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/region
+/// 设置凭据 Region
+pub async fn set_credential_region(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<SetRegionRequest>,
+) -> impl IntoResponse {
+    match state
+        .service
+        .set_region(id, payload.region, payload.api_region)
+    {
+        Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} Region 已更新", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
