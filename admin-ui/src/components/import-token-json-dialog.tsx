@@ -71,14 +71,70 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
     setTimeout(resetState, 200)
   }, [onOpenChange, resetState, isVerifying])
 
-  // 解析 JSON
+  // 将 KAM 账号结构展平为 TokenJsonItem
+  const flattenKamAccount = useCallback((account: Record<string, unknown>): TokenJsonItem | null => {
+    const cred = account.credentials as Record<string, unknown> | undefined
+    if (!cred || typeof cred !== 'object') return null
+    // refreshToken 必须是非空字符串
+    if (typeof cred.refreshToken !== 'string' || !cred.refreshToken.trim()) return null
+    // 跳过 error 状态的账号
+    if (account.status === 'error') return null
+    const authMethod = cred.authMethod as string | undefined
+    return {
+      refreshToken: cred.refreshToken.trim(),
+      clientId: cred.clientId as string | undefined,
+      clientSecret: cred.clientSecret as string | undefined,
+      authMethod: (!authMethod && cred.clientId && cred.clientSecret) ? 'idc' : authMethod,
+      region: cred.region as string | undefined,
+      machineId: account.machineId as string | undefined,
+    }
+  }, [])
+
+  // 解析 JSON（兼容 Token JSON / KAM 导出 / 批量导入格式）
   const parseJson = useCallback((text: string): TokenJsonItem[] | null => {
     try {
       const parsed = JSON.parse(text)
-      const items = Array.isArray(parsed) ? parsed : [parsed]
-      const validItems = items.filter(
-        (item) => item && typeof item === 'object' && item.refreshToken
-      )
+
+      let rawItems: unknown[]
+
+      // KAM 标准导出格式：{ version, accounts: [...] }
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Array.isArray(parsed.accounts)) {
+        rawItems = parsed.accounts
+      } else if (Array.isArray(parsed)) {
+        rawItems = parsed
+      } else if (parsed && typeof parsed === 'object') {
+        rawItems = [parsed]
+      } else {
+        toast.error('JSON 格式无效')
+        return null
+      }
+
+      const validItems: TokenJsonItem[] = []
+      for (const item of rawItems) {
+        if (!item || typeof item !== 'object') continue
+        const obj = item as Record<string, unknown>
+
+        // KAM 嵌套格式：{ credentials: { refreshToken, ... } }
+        if (obj.credentials && typeof obj.credentials === 'object') {
+          const flat = flattenKamAccount(obj)
+          if (flat) validItems.push(flat)
+          continue
+        }
+
+        // 扁平格式：{ refreshToken, ... }
+        if (typeof obj.refreshToken === 'string' && obj.refreshToken.trim()) {
+          const tokenItem = { ...obj, refreshToken: obj.refreshToken.trim() } as TokenJsonItem
+          // 兼容旧批量导入的 authRegion 字段
+          if (!tokenItem.region && obj.authRegion) {
+            tokenItem.region = obj.authRegion as string
+          }
+          if (!tokenItem.authMethod && tokenItem.clientId && tokenItem.clientSecret) {
+            tokenItem.authMethod = 'idc'
+          }
+          validItems.push(tokenItem)
+        }
+      }
+
       if (validItems.length === 0) {
         toast.error('JSON 中没有找到有效的凭据（需要包含 refreshToken 字段）')
         return null
@@ -88,7 +144,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
       toast.error('JSON 格式无效')
       return null
     }
-  }, [])
+  }, [flattenKamAccount])
 
   // 文件拖放
   const handleDrop = useCallback((e: React.DragEvent) => {

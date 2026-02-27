@@ -86,10 +86,6 @@ pub struct Config {
     #[serde(default)]
     pub credential_rpm: Option<u32>,
 
-    /// 负载均衡模式（"priority" 或 "balanced"）
-    #[serde(default = "default_load_balancing_mode")]
-    pub load_balancing_mode: String,
-
     /// 输入压缩配置
     #[serde(default)]
     pub compression: CompressionConfig,
@@ -130,10 +126,6 @@ fn default_count_tokens_auth_type() -> String {
 
 fn default_tls_backend() -> TlsBackend {
     TlsBackend::Rustls
-}
-
-fn default_load_balancing_mode() -> String {
-    "priority".to_string()
 }
 
 fn default_true() -> bool {
@@ -291,7 +283,6 @@ impl Default for Config {
             proxy_password: None,
             admin_api_key: None,
             credential_rpm: None,
-            load_balancing_mode: default_load_balancing_mode(),
             compression: CompressionConfig::default(),
             config_path: None,
         }
@@ -329,11 +320,13 @@ impl Config {
     }
 
     /// 获取配置文件路径（如果有）
+    #[allow(dead_code)]
     pub fn config_path(&self) -> Option<&Path> {
         self.config_path.as_deref()
     }
 
     /// 将当前配置写回原始配置文件
+    #[allow(dead_code)]
     pub fn save(&self) -> anyhow::Result<()> {
         let path = self
             .config_path

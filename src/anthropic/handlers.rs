@@ -57,15 +57,27 @@ fn is_quota_exhausted_error(err: &Error) -> bool {
     s.contains("所有凭据已用尽")
 }
 
+/// 网络错误关键字（is_transient_upstream_error 和 is_network_error 共用）
+const NETWORK_ERROR_PATTERNS: &[&str] = &[
+    "error sending request",
+    "connection closed",
+    "connection reset",
+];
+
+fn is_network_error(s: &str) -> bool {
+    NETWORK_ERROR_PATTERNS.iter().any(|p| s.contains(p))
+}
+
 fn is_transient_upstream_error(err: &Error) -> bool {
-    let s = err.to_string();
-    s.contains("429 Too Many Requests")
-        || s.contains("INSUFFICIENT_MODEL_CAPACITY")
+    let s = err.to_string().to_lowercase();
+    s.contains("429 too many requests")
+        || s.contains("insufficient_model_capacity")
         || s.contains("high traffic")
-        || s.contains("408 Request Timeout")
-        || s.contains("502 Bad Gateway")
-        || s.contains("503 Service Unavailable")
-        || s.contains("504 Gateway Timeout")
+        || s.contains("408 request timeout")
+        || s.contains("502 bad gateway")
+        || s.contains("503 service unavailable")
+        || s.contains("504 gateway timeout")
+        || is_network_error(&s)
 }
 
 fn is_improperly_formed_request_error(err: &Error) -> bool {
@@ -344,10 +356,22 @@ fn map_kiro_provider_error_to_response(request_body: &str, err: Error) -> Respon
     }
 
     if is_transient_upstream_error(&err) {
+        let err_str = err.to_string().to_lowercase();
+        if is_network_error(&err_str) {
+            tracing::warn!(error = %err, "上游网络错误，不输出请求体");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse::new(
+                    "api_error",
+                    format!("上游网络错误: {}", err),
+                )),
+            )
+                .into_response();
+        }
         tracing::warn!(error = %err, "上游瞬态错误（429/5xx），不输出请求体");
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(ErrorResponse::new("rate_limit_error", &err.to_string())),
+            Json(ErrorResponse::new("rate_limit_error", err.to_string())),
         )
             .into_response();
     }
@@ -355,8 +379,9 @@ fn map_kiro_provider_error_to_response(request_body: &str, err: Error) -> Respon
     tracing::error!("Kiro API 调用失败: {}", err);
     #[cfg(feature = "sensitive-logs")]
     tracing::error!(
-        "上游报错，完整请求体（用于诊断）: {}",
-        truncate_base64_in_request_body(request_body)
+        request_body_bytes = request_body.len(),
+        "上游报错，请求体大小: {} bytes",
+        request_body.len()
     );
     (
         StatusCode::BAD_GATEWAY,
@@ -1127,6 +1152,18 @@ async fn handle_non_stream_request(
 
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
     let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
+
+    #[cfg(feature = "sensitive-logs")]
+    tracing::info!(
+        estimated_input_tokens = input_tokens,
+        context_input_tokens = ?context_input_tokens,
+        final_input_tokens,
+        output_tokens,
+        "Non-stream usage: final_input_tokens={} (来源={}), output_tokens={}",
+        final_input_tokens,
+        if context_input_tokens.is_some() { "contextUsageEvent" } else { "估算" },
+        output_tokens
+    );
 
     // 构建 Anthropic 响应
     let response_body = json!({

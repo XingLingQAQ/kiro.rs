@@ -660,8 +660,6 @@ pub struct MultiTokenManager {
     cooldown_manager: CooldownManager,
     /// 后台刷新器
     background_refresher: Option<Arc<BackgroundRefresher>>,
-    /// 负载均衡模式（运行时可修改）
-    load_balancing_mode: Mutex<String>,
     /// 最近一次统计持久化时间（用于 debounce）
     last_stats_save_at: Mutex<Option<Instant>>,
     /// 统计数据是否有未落盘更新
@@ -864,7 +862,6 @@ impl MultiTokenManager {
             })
             .collect();
 
-        let load_balancing_mode = config.load_balancing_mode.clone();
         let manager = Self {
             config,
             proxy,
@@ -880,7 +877,6 @@ impl MultiTokenManager {
             rate_limiter: RateLimiter::new(rate_limit_config),
             cooldown_manager: CooldownManager::new(),
             background_refresher: None,
-            load_balancing_mode: Mutex::new(load_balancing_mode),
             last_stats_save_at: Mutex::new(None),
             stats_dirty: AtomicBool::new(false),
         };
@@ -1060,40 +1056,6 @@ impl MultiTokenManager {
         // 兜底：完全相同则轮询，避免总选第一个
         let index = rr % scored.len();
         Some(scored[index].0)
-    }
-
-    /// 根据负载均衡模式选择下一个凭据
-    ///
-    /// - priority 模式：选择优先级最高（priority 最小）的可用凭据
-    /// - balanced 模式：轮询选择可用凭据
-    #[allow(dead_code)]
-    fn select_next_credential(&self) -> Option<(u64, KiroCredentials)> {
-        let entries = self.entries.lock();
-        let available: Vec<_> = entries.iter().filter(|e| !e.disabled).collect();
-
-        if available.is_empty() {
-            return None;
-        }
-
-        let mode = self.load_balancing_mode.lock().clone();
-        let mode = mode.as_str();
-
-        match mode {
-            "balanced" => {
-                // Least-Used 策略：选择成功次数最少的凭据
-                // 平局时按优先级排序（数字越小优先级越高）
-                let entry = available
-                    .iter()
-                    .min_by_key(|e| (e.success_count, e.credentials.priority))?;
-
-                Some((entry.id, entry.credentials.clone()))
-            }
-            _ => {
-                // priority 模式（默认）：选择优先级最高的
-                let entry = available.iter().min_by_key(|e| e.credentials.priority)?;
-                Some((entry.id, entry.credentials.clone()))
-            }
-        }
     }
 
     /// 获取 API 调用上下文
@@ -2677,54 +2639,6 @@ impl MultiTokenManager {
         self.cooldown_manager.cleanup_expired()
     }
 
-    /// 获取负载均衡模式（Admin API）
-    pub fn get_load_balancing_mode(&self) -> String {
-        self.load_balancing_mode.lock().clone()
-    }
-
-    fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
-        use anyhow::Context;
-
-        let config_path = match self.config.config_path() {
-            Some(path) => path.to_path_buf(),
-            None => {
-                tracing::warn!("配置文件路径未知，负载均衡模式仅在当前进程生效: {}", mode);
-                return Ok(());
-            }
-        };
-
-        let mut config = Config::load(&config_path)
-            .with_context(|| format!("重新加载配置失败: {}", config_path.display()))?;
-        config.load_balancing_mode = mode.to_string();
-        config
-            .save()
-            .with_context(|| format!("持久化负载均衡模式失败: {}", config_path.display()))?;
-
-        Ok(())
-    }
-
-    /// 设置负载均衡模式（Admin API）
-    pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
-        // 验证模式值
-        if mode != "priority" && mode != "balanced" {
-            anyhow::bail!("无效的负载均衡模式: {}", mode);
-        }
-
-        let previous_mode = self.get_load_balancing_mode();
-        if previous_mode == mode {
-            return Ok(());
-        }
-
-        *self.load_balancing_mode.lock() = mode.clone();
-
-        if let Err(err) = self.persist_load_balancing_mode(&mode) {
-            *self.load_balancing_mode.lock() = previous_mode;
-            return Err(err);
-        }
-
-        tracing::info!("负载均衡模式已设置为: {}", mode);
-        Ok(())
-    }
 }
 
 impl Drop for MultiTokenManager {
@@ -2940,28 +2854,6 @@ mod tests {
         // 再失败一次不会禁用（因为计数已重置）
         manager.report_failure(1);
         assert_eq!(manager.available_count(), 1);
-    }
-
-    #[test]
-    fn test_set_load_balancing_mode_persists_to_config_file() {
-        let config_path =
-            std::env::temp_dir().join(format!("kiro-load-balancing-{}.json", uuid::Uuid::new_v4()));
-        std::fs::write(&config_path, r#"{"loadBalancingMode":"priority"}"#).unwrap();
-
-        let config = Config::load(&config_path).unwrap();
-        let manager =
-            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
-                .unwrap();
-
-        manager
-            .set_load_balancing_mode("balanced".to_string())
-            .unwrap();
-
-        let persisted = Config::load(&config_path).unwrap();
-        assert_eq!(persisted.load_balancing_mode, "balanced");
-        assert_eq!(manager.get_load_balancing_mode(), "balanced");
-
-        std::fs::remove_file(&config_path).unwrap();
     }
 
     #[tokio::test]

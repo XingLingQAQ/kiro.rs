@@ -1057,6 +1057,18 @@ impl StreamContext {
         // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
         let final_input_tokens = self.context_input_tokens.unwrap_or(self.input_tokens);
 
+        #[cfg(feature = "sensitive-logs")]
+        tracing::info!(
+            estimated_input_tokens = self.input_tokens,
+            context_input_tokens = ?self.context_input_tokens,
+            final_input_tokens,
+            output_tokens = self.output_tokens,
+            "StreamContext usage: final_input_tokens={} (来源={}), output_tokens={}",
+            final_input_tokens,
+            if self.context_input_tokens.is_some() { "contextUsageEvent" } else { "估算" },
+            self.output_tokens
+        );
+
         // 生成最终事件
         events.extend(
             self.state_manager
@@ -1143,6 +1155,18 @@ impl BufferedStreamContext {
             .inner
             .context_input_tokens
             .unwrap_or(self.estimated_input_tokens);
+
+        #[cfg(feature = "sensitive-logs")]
+        tracing::info!(
+            estimated_input_tokens = self.estimated_input_tokens,
+            context_input_tokens = ?self.inner.context_input_tokens,
+            final_input_tokens,
+            output_tokens = self.inner.output_tokens,
+            "BufferedStreamContext usage: final_input_tokens={} (来源={}), output_tokens={}",
+            final_input_tokens,
+            if self.inner.context_input_tokens.is_some() { "contextUsageEvent" } else { "估算" },
+            self.inner.output_tokens
+        );
 
         // 更正 message_start 事件中的 input_tokens
         for event in &mut self.event_buffer {

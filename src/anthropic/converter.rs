@@ -32,10 +32,10 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     };
 
     // $schema（必须是非空字符串）
-    if !obj
+    if obj
         .get("$schema")
         .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty())
+        .is_none_or(|s| s.is_empty())
     {
         obj.insert(
             "$schema".to_string(),
@@ -44,10 +44,10 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     }
 
     // type（必须是字符串）
-    if !obj
+    if obj
         .get("type")
         .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty())
+        .is_none_or(|s| s.is_empty())
     {
         obj.insert(
             "type".to_string(),

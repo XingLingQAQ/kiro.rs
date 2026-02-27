@@ -17,7 +17,7 @@ use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CachedBalanceItem,
     CachedBalancesResponse, CredentialStatusItem, CredentialsStatusResponse, ImportAction,
     ImportItemResult, ImportSummary, ImportTokenJsonRequest, ImportTokenJsonResponse,
-    LoadBalancingModeResponse, SetLoadBalancingModeRequest, TokenJsonItem,
+    TokenJsonItem,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -268,32 +268,6 @@ impl AdminService {
         self.save_balance_cache();
 
         Ok(())
-    }
-
-    /// 获取负载均衡模式
-    pub fn get_load_balancing_mode(&self) -> LoadBalancingModeResponse {
-        LoadBalancingModeResponse {
-            mode: self.token_manager.get_load_balancing_mode(),
-        }
-    }
-
-    /// 设置负载均衡模式
-    pub fn set_load_balancing_mode(
-        &self,
-        req: SetLoadBalancingModeRequest,
-    ) -> Result<LoadBalancingModeResponse, AdminServiceError> {
-        // 验证模式值
-        if req.mode != "priority" && req.mode != "balanced" {
-            return Err(AdminServiceError::InvalidCredential(
-                "mode 必须是 'priority' 或 'balanced'".to_string(),
-            ));
-        }
-
-        self.token_manager
-            .set_load_balancing_mode(req.mode.clone())
-            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-
-        Ok(LoadBalancingModeResponse { mode: req.mode })
     }
 
     // ============ 余额缓存持久化 ============

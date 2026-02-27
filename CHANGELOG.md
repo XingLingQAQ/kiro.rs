@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **合并三个导入对话框为一个** — 删除冗余的 `KamImportDialog` 和 `BatchImportDialog`，统一使用 `ImportTokenJsonDialog`，自动识别 KAM 嵌套格式、扁平凭据格式和 Token JSON 格式 (`admin-ui/src/components/`)
+- **上游网络错误归类为瞬态错误** — `error sending request`/`connection closed`/`connection reset` 纳入 `is_transient_upstream_error`，返回 502 且不输出请求体 (`src/anthropic/handlers.rs`)
+- **上游报错不再输出完整请求体** — `sensitive-logs` 模式下仅输出请求体字节数 (`src/anthropic/handlers.rs`)
+- **瞬态错误匹配大小写归一化** — `is_transient_upstream_error` 统一 `.to_lowercase()` 后匹配，提取 `NETWORK_ERROR_PATTERNS` 常量消除重复 (`src/anthropic/handlers.rs`)
+
+### Removed
+- **移除负载均衡模式切换** — 删除前端按钮/API/hooks 和后端路由/handler/service/types/config 字段/token_manager 方法及测试，该设置实际未被使用 (`admin-ui/`, `src/admin/`, `src/kiro/token_manager.rs`, `src/model/config.rs`)
+
+### Added
+- **Usage 诊断日志** — 流式/缓冲流式/非流式三条路径均增加 `sensitive-logs` 保护的 usage 日志，输出 estimated/context/final input_tokens 及来源、output_tokens (`src/anthropic/stream.rs`, `src/anthropic/handlers.rs`)
+
 ## [v1.1.2] - 2026-02-27
 
 ### Added
