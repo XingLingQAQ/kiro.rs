@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.1.3] - 2026-02-27
 
 ### Changed
 - **合并三个导入对话框为一个** — 删除冗余的 `KamImportDialog` 和 `BatchImportDialog`，统一使用 `ImportTokenJsonDialog`，自动识别 KAM 嵌套格式、扁平凭据格式和 Token JSON 格式 (`admin-ui/src/components/`)
