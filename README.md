@@ -22,7 +22,6 @@
 - **流式响应**: 支持 SSE (Server-Sent Events) 流式输出
 - **Token 自动刷新**: 自动管理和刷新 OAuth Token
 - **多凭据支持**: 支持配置多个凭据，按优先级自动故障转移
-- **负载均衡**: 支持 `priority`（按优先级）和 `balanced`（均衡分配）两种模式
 - **智能重试**: 单凭据最多重试 3 次，单请求最多重试 9 次
 - **凭据回写**: 多凭据格式下自动回写刷新后的 Token
 - **Thinking 模式**: 支持 Claude 的 extended thinking 功能
@@ -176,7 +175,6 @@ docker-compose up
 | `proxyUsername` | string | - | 代理用户名 |
 | `proxyPassword` | string | - | 代理密码 |
 | `adminApiKey` | string | - | Admin API 密钥，配置后启用凭据管理 API 和 Web 管理界面 |
-| `loadBalancingMode` | string | `priority` | 负载均衡模式：`priority`（按优先级）或 `balanced`（均衡分配） |
 
 完整配置示例：
 
@@ -199,8 +197,7 @@ docker-compose up
    "proxyUrl": "http://127.0.0.1:7890",
    "proxyUsername": "user",
    "proxyPassword": "pass",
-   "adminApiKey": "sk-admin-your-secret-key",
-   "loadBalancingMode": "priority"
+   "adminApiKey": "sk-admin-your-secret-key"
 }
 ```
 
