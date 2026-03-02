@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.1.5] - 2026-03-02
+
+### Fixed
+- **防止孤立 tool_result 导致空消息** — `convert_user_message` 新增最终兜底逻辑，当 tool_result 被过滤为孤立块后 content 变空时插入占位符 "."，避免上游返回 400 "Improperly formed request"；新增回归测试覆盖孤立 tool_result 场景 (`src/anthropic/converter.rs`)
+
 ## [v1.1.4] - 2026-03-02
 
 ### Fixed
