@@ -399,7 +399,14 @@ pub fn convert_request(
 
     // 12. 构建当前消息
     // 保留文本内容，即使有工具结果也不丢弃用户文本
-    let content = non_empty_content_or_space(text_content, !images.is_empty() || has_tool_results);
+    let mut content =
+        non_empty_content_or_space(text_content, !images.is_empty() || has_tool_results);
+    // tool_result 可能在配对校验阶段被过滤，导致当前消息最终变成空字符串。
+    // 上游会拒绝空 content（400 Improperly formed request），因此这里做最终兜底。
+    if content.trim().is_empty() {
+        tracing::warn!("currentMessage content 为空，已使用占位符修复");
+        content = ".".to_string();
+    }
 
     let mut user_input = UserInputMessage::new(content, &model_id)
         .with_context(context)
@@ -2094,6 +2101,74 @@ mod tests {
             assert_eq!(user_msg.user_input_message.content, ".");
         }
         assert!(found, "测试数据应在 history 中包含 tool_results");
+    }
+
+    #[test]
+    fn test_current_message_content_is_non_empty_when_tool_result_filtered_as_orphan() {
+        use super::super::types::{Message as AnthropicMessage, Tool as AnthropicTool};
+        use std::collections::HashMap;
+
+        // 场景：当前消息仅有 tool_result，但 tool_use_id 与历史不匹配（会被过滤为孤立结果）
+        // 过滤后当前消息无文本/无 tool_result，必须仍保留非空 content 占位符，避免上游 400。
+        let req = MessagesRequest {
+            model: "claude-sonnet-4".to_string(),
+            max_tokens: 128,
+            messages: vec![
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: serde_json::json!("请读取配置"),
+                },
+                AnthropicMessage {
+                    role: "assistant".to_string(),
+                    content: serde_json::json!([
+                        {"type": "tool_use", "id": "tooluse_valid_1", "name": "read_file", "input": {"path": "/tmp/a"}}
+                    ]),
+                },
+                AnthropicMessage {
+                    role: "user".to_string(),
+                    content: serde_json::json!([
+                        {"type": "tool_result", "tool_use_id": "toolu_orphan_1", "content": "ok"}
+                    ]),
+                },
+            ],
+            stream: false,
+            system: None,
+            tools: Some(vec![AnthropicTool {
+                tool_type: None,
+                name: "read_file".to_string(),
+                description: "read".to_string(),
+                input_schema: HashMap::new(),
+                max_uses: None,
+            }]),
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        };
+
+        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
+
+        // 孤立 tool_result 会被过滤
+        assert!(
+            result
+                .conversation_state
+                .current_message
+                .user_input_message
+                .user_input_message_context
+                .tool_results
+                .is_empty(),
+            "孤立 tool_result 应被过滤"
+        );
+
+        // 过滤后 content 仍应为非空占位符，避免上游拒绝请求
+        assert_eq!(
+            result
+                .conversation_state
+                .current_message
+                .user_input_message
+                .content,
+            "."
+        );
     }
 
     #[test]
