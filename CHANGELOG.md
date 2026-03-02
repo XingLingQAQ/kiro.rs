@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **WebSearch 历史消息上下文保留** — `convert_assistant_message` 新增对 `server_tool_use`（忽略）和 `web_search_tool_result`（提取 title、url、snippet、page_age 为纯文本）的处理，修复多轮对话中搜索结果被静默丢弃导致 Kiro 丢失上下文的问题；使用纯文本格式彻底规避特殊字符破坏格式的风险；新增 2 个单元测试覆盖上述路径 (`src/anthropic/converter.rs`)
+
 ## [v1.1.3] - 2026-02-27
 
 ### Changed

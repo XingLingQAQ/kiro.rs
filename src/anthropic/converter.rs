@@ -1097,6 +1097,69 @@ fn convert_assistant_message(
                                 tool_uses.push(ToolUseEntry::new(id, name).with_input(input));
                             }
                         }
+                        // WebSearch 相关块：server_tool_use 忽略，
+                        // web_search_tool_result 提取 title/url/snippet/page_age 保留到对话历史
+                        "server_tool_use" => {}
+                        "web_search_tool_result" => {
+                            // 注意：历史文本长度由 compressor.rs 的压缩流程统一管理，
+                            // 此处无需额外截断。实际效果需运行时验证。
+                            //
+                            // encrypted_content 字段：本项目中由 websearch.rs 写入，
+                            // 存储的是可读 snippet；若上游改为原生 Anthropic WebSearch 响应，
+                            // 该字段语义可能不同，届时需重新评估是否保留。
+                            if let Some(serde_json::Value::Array(results)) = block.content {
+                                for result in &results {
+                                    if result.get("type").and_then(|t| t.as_str())
+                                        == Some("web_search_result")
+                                    {
+                                        let title = result
+                                            .get("title")
+                                            .and_then(|t| t.as_str())
+                                            .unwrap_or("");
+                                        let url = result
+                                            .get("url")
+                                            .and_then(|u| u.as_str())
+                                            .unwrap_or("");
+                                        if !url.is_empty() {
+                                            // 历史上下文仅供 Kiro 模型理解，使用纯文本格式
+                                            // 避免 title/url 含特殊字符时 Markdown 语法被破坏
+                                            let snippet = result
+                                                .get("encrypted_content")
+                                                .and_then(|s| s.as_str())
+                                                .unwrap_or("");
+                                            let page_age = result
+                                                .get("page_age")
+                                                .and_then(|s| s.as_str())
+                                                .unwrap_or("");
+                                            // 剥除控制字符（换行等），保持单行
+                                            let clean_title: String =
+                                                title.chars().filter(|c| !c.is_control()).collect();
+                                            let clean_snippet: String = snippet
+                                                .chars()
+                                                .filter(|c| !c.is_control())
+                                                .collect();
+                                            if clean_title.is_empty() {
+                                                text_content.push_str(&format!("{}\n", url));
+                                            } else {
+                                                text_content.push_str(&format!(
+                                                    "{}: {}\n",
+                                                    clean_title, url
+                                                ));
+                                            }
+                                            if !page_age.is_empty() {
+                                                text_content
+                                                    .push_str(&format!("Date: {}\n", page_age));
+                                            }
+                                            if !clean_snippet.is_empty() {
+                                                text_content
+                                                    .push_str(&format!("{}\n", clean_snippet));
+                                            }
+                                            text_content.push('\n');
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1721,6 +1784,80 @@ mod tests {
             .expect("应该有 tool_uses");
         assert_eq!(tool_uses.len(), 1);
         assert_eq!(tool_uses[0].tool_use_id, "toolu_02XYZ");
+    }
+
+    #[test]
+    fn test_convert_assistant_message_web_search_tool_result() {
+        use super::super::types::Message as AnthropicMessage;
+
+        // 测试 web_search_tool_result 块被提取为纯文本（title、url、snippet、page_age）保留到历史
+        let msg = AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {"type": "server_tool_use", "id": "srvtoolu_01ABC", "name": "web_search", "input": {"query": "rust async"}},
+                {
+                    "type": "web_search_tool_result",
+                    "content": [
+                        {
+                            "type": "web_search_result",
+                            "title": "Async in Rust",
+                            "url": "https://rust-lang.org/async",
+                            "encrypted_content": "Rust async/await guide.",
+                            "page_age": "January 1, 2025"
+                        },
+                        {"type": "web_search_result", "title": "", "url": "https://example.com/no-title",
+                         "encrypted_content": "", "page_age": null}
+                    ]
+                }
+            ]),
+        };
+
+        let result = convert_assistant_message(&msg).expect("应该成功转换");
+        let content = &result.assistant_response_message.content;
+
+        assert!(
+            content.contains("Async in Rust: https://rust-lang.org/async"),
+            "有 title 时应输出 'title: url'"
+        );
+        assert!(content.contains("Date: January 1, 2025"), "page_age 应保留");
+        assert!(
+            content.contains("Rust async/await guide."),
+            "snippet 应保留"
+        );
+        assert!(
+            content.contains("https://example.com/no-title"),
+            "title 为空时应输出纯 URL"
+        );
+        assert!(
+            !content.contains("srvtoolu_01ABC"),
+            "server_tool_use 应被忽略"
+        );
+    }
+
+    #[test]
+    fn test_convert_assistant_message_web_search_result_control_chars() {
+        use super::super::types::Message as AnthropicMessage;
+
+        // 测试 title 含控制字符时被过滤
+        let msg = AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {
+                    "type": "web_search_tool_result",
+                    "content": [
+                        {"type": "web_search_result", "title": "Title\nWith\tControl", "url": "https://example.com"}
+                    ]
+                }
+            ]),
+        };
+
+        let result = convert_assistant_message(&msg).expect("应该成功转换");
+        let content = &result.assistant_response_message.content;
+
+        // 控制字符被过滤，不应出现换行和 tab
+        assert!(!content.contains('\t'), "tab 字符应被过滤");
+        // 内容应包含 URL
+        assert!(content.contains("https://example.com"), "URL 应保留");
     }
 
     #[test]
