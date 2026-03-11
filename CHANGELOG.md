@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.1.6] - 2026-03-11
+
+### Fixed
+- **压缩后空 content 兜底修复** — 在输入压缩管道末尾新增统一修复 pass，将空/全空白 content 替换为 "."，覆盖空白压缩、thinking discard、tool pairing 修复后的空内容场景；新增回归测试确保 history/current/assistant 均不会产生空 text block (`src/anthropic/compressor.rs`)
+
 ## [v1.1.5] - 2026-03-02
 
 ### Fixed
