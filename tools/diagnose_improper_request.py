@@ -360,8 +360,8 @@ def main(argv: List[str]) -> int:
         "--context", action="store_true", default=False,
         help="Phase 1 每条 400 错误后用 sed 输出前后日志上下文（默认关闭）",
     )
-    parser.add_argument("--context-before", type=int, default=10, help="sed 上下文：向上行数（默认 10）")
-    parser.add_argument("--context-after", type=int, default=3, help="sed 上下文：向下行数（默认 3）")
+    parser.add_argument("--context-before", type=int, default=15, help="sed 上下文：向上行数（默认 15）")
+    parser.add_argument("--context-after", type=int, default=15, help="sed 上下文：向下行数（默认 15）")
     args = parser.parse_args(argv)
 
     log_path = args.log
