@@ -356,6 +356,12 @@ def main(argv: List[str]) -> int:
     # 上游存在约 5MiB 左右的硬限制；默认用 4.5MiB 作为“接近风险”的提示阈值。
     parser.add_argument("--large-bytes", type=int, default=4_718_592, help="payload 大阈值（启发式）")
     parser.add_argument("--huge-bytes", type=int, default=8_388_608, help="payload 巨大阈值（启发式）")
+    parser.add_argument(
+        "--context", action="store_true", default=False,
+        help="Phase 1 每条 400 错误后用 sed 输出前后日志上下文（默认关闭）",
+    )
+    parser.add_argument("--context-before", type=int, default=10, help="sed 上下文：向上行数（默认 10）")
+    parser.add_argument("--context-after", type=int, default=3, help="sed 上下文：向下行数（默认 3）")
     args = parser.parse_args(argv)
 
     log_path = args.log
@@ -424,6 +430,8 @@ def main(argv: List[str]) -> int:
                       f"assistantMsgs={body.get('_assistant_msg_count', '?')} "
                       f"userMsgs={body.get('_user_msg_count', '?')} "
                       f"raw_len={body.get('_raw_len', '?')}")
+            if args.context:
+                _print_sed_context(log_path, el['line_no'], args.context_before, args.context_after)
     else:
         print("  未发现 400 Improperly formed request 错误")
     print()
@@ -609,6 +617,33 @@ def _scan_400_errors(
         results.append(entry)
 
     return results
+
+
+def _print_sed_context(log_path: str, line_no: int, before: int, after: int) -> None:
+    """用 sed 打印指定行前后的日志上下文，并同时输出等效的 sed 命令供复用。"""
+    import subprocess
+    start = max(1, line_no - before)
+    end = line_no + after
+    sed_cmd = f"sed -n '{start},{end}p' \"{log_path}\""
+    print(f"    ↳ sed: {sed_cmd}")
+    try:
+        result = subprocess.run(
+            ["sed", "-n", f"{start},{end}p", log_path],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        if result.stdout:
+            print("    " + "-" * 56)
+            for i, ctx_line in enumerate(result.stdout.splitlines()):
+                actual_line_no = start + i
+                marker = ">>" if actual_line_no == line_no else "  "
+                print(f"    {marker} {actual_line_no:6d} | {ctx_line}")
+            print("    " + "-" * 56)
+        if result.returncode != 0 and result.stderr:
+            print(f"    [sed error] {result.stderr.strip()}")
+    except FileNotFoundError:
+        print("    [sed not found] 请手动执行上方命令")
 
 
 def _scan_local_rejects(log_text: str) -> List[Dict[str, Any]]:
