@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.1.7] - 2026-03-14
+
+### Fixed
+- **tool_result 空 text 字段兜底修复** — `repair_non_empty_content_pass` 扩展覆盖 `tool_result` content 数组中 `text` 字段为空字符串或纯空白的场景，替换为 "."，防止上游因空 text 返回 400；新增 4 个回归测试覆盖 history/current_message/纯空白/非空不修改四种情况 (`src/anthropic/compressor.rs`)
+
 ## [v1.1.6] - 2026-03-11
 
 ### Fixed

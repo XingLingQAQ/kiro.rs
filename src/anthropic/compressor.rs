@@ -93,10 +93,7 @@ pub fn compress(state: &mut ConversationState, config: &CompressionConfig) -> Co
 
     let repaired_non_empty_contents = repair_non_empty_content_pass(state);
     if repaired_non_empty_contents > 0 {
-        tracing::debug!(
-            repaired_non_empty_contents,
-            "压缩后已修复空 content 占位符"
-        );
+        tracing::debug!(repaired_non_empty_contents, "压缩后已修复空 content 占位符");
     }
 
     stats
@@ -575,6 +572,7 @@ fn repair_tool_pairing_pass(state: &mut ConversationState) -> (usize, usize) {
 /// - history user_input_message.content
 /// - history assistant_response_message.content
 /// - current_message.user_input_message.content
+/// - history/current tool_result content 数组中 text 字段为空字符串的条目
 fn repair_non_empty_content_pass(state: &mut ConversationState) -> usize {
     let mut repaired = 0usize;
 
@@ -584,6 +582,12 @@ fn repair_non_empty_content_pass(state: &mut ConversationState) -> usize {
                 if repair_content_field(&mut user_msg.user_input_message.content) {
                     repaired += 1;
                 }
+                repaired += repair_tool_result_text_fields(
+                    &mut user_msg
+                        .user_input_message
+                        .user_input_message_context
+                        .tool_results,
+                );
             }
             Message::Assistant(assistant_msg) => {
                 if repair_content_field(&mut assistant_msg.assistant_response_message.content) {
@@ -596,7 +600,32 @@ fn repair_non_empty_content_pass(state: &mut ConversationState) -> usize {
     if repair_content_field(&mut state.current_message.user_input_message.content) {
         repaired += 1;
     }
+    repaired += repair_tool_result_text_fields(
+        &mut state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tool_results,
+    );
 
+    repaired
+}
+
+/// 修复 tool_result content 数组中 text 字段为空字符串的条目，替换为 "."。
+fn repair_tool_result_text_fields(
+    results: &mut Vec<crate::kiro::model::requests::tool::ToolResult>,
+) -> usize {
+    let mut repaired = 0usize;
+    for result in results.iter_mut() {
+        for map in result.content.iter_mut() {
+            if let Some(serde_json::Value::String(text)) = map.get_mut("text") {
+                if text.trim().is_empty() {
+                    *text = ".".to_string();
+                    repaired += 1;
+                }
+            }
+        }
+    }
     repaired
 }
 
@@ -861,10 +890,8 @@ mod tests {
 
         let user_with_tool_result = Message::User(HistoryUserMessage {
             user_input_message: UserMessage::new(" ", "claude-sonnet-4.5").with_context(
-                UserInputMessageContext::new().with_tool_results(vec![ToolResult::success(
-                    tool_use_id,
-                    "ok",
-                )]),
+                UserInputMessageContext::new()
+                    .with_tool_results(vec![ToolResult::success(tool_use_id, "ok")]),
             ),
         });
 
@@ -891,7 +918,12 @@ mod tests {
 
         if let Message::User(u) = &state.history[1] {
             assert_eq!(u.user_input_message.content, ".");
-            assert!(u.user_input_message.user_input_message_context.tool_results.is_empty());
+            assert!(
+                u.user_input_message
+                    .user_input_message_context
+                    .tool_results
+                    .is_empty()
+            );
         } else {
             panic!("expected User message");
         }
@@ -1255,5 +1287,191 @@ mod tests {
             state.current_message.user_input_message.content,
             long_content
         );
+    }
+
+    #[test]
+    fn test_repair_tool_result_empty_text_in_history() {
+        // tool_result content[*].text 为空字符串时，应被修复为 "."
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "text".to_string(),
+            serde_json::Value::String("".to_string()),
+        );
+
+        let tool_result = ToolResult {
+            tool_use_id: "t1".to_string(),
+            content: vec![map],
+            status: Some("success".to_string()),
+            is_error: false,
+        };
+
+        // 需要对应的 tool_use，否则会被 repair_tool_pairing_pass 移除
+        let tool_use = ToolUseEntry::new("t1", "read");
+        let assistant_msg = Message::Assistant(HistoryAssistantMessage {
+            assistant_response_message: AssistantMessage::new("ok").with_tool_uses(vec![tool_use]),
+        });
+
+        let user_msg = Message::User(HistoryUserMessage {
+            user_input_message: UserMessage::new("do it", "claude-sonnet-4.5")
+                .with_context(UserInputMessageContext::new().with_tool_results(vec![tool_result])),
+        });
+
+        let mut state = ConversationState::new("test")
+            .with_current_message(CurrentMessage::new(UserInputMessage::new(
+                "next",
+                "claude-sonnet-4.5",
+            )))
+            .with_history(vec![assistant_msg, user_msg]);
+
+        let config = CompressionConfig::default();
+        let _stats = compress(&mut state, &config);
+
+        if let Message::User(u) = &state.history[1] {
+            let text =
+                u.user_input_message.user_input_message_context.tool_results[0].content[0]["text"]
+                    .as_str()
+                    .unwrap();
+            assert_eq!(text, ".", "空 text 应被修复为 '.'");
+        } else {
+            panic!("expected User message");
+        }
+    }
+
+    #[test]
+    fn test_repair_tool_result_empty_text_in_current() {
+        // current_message tool_result content[*].text 为空字符串时，应被修复为 "."
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "text".to_string(),
+            serde_json::Value::String("".to_string()),
+        );
+
+        let tool_result = ToolResult {
+            tool_use_id: "t2".to_string(),
+            content: vec![map],
+            status: Some("success".to_string()),
+            is_error: false,
+        };
+
+        let tool_use = ToolUseEntry::new("t2", "write");
+        let assistant_msg = Message::Assistant(HistoryAssistantMessage {
+            assistant_response_message: AssistantMessage::new("ok").with_tool_uses(vec![tool_use]),
+        });
+
+        let current = UserInputMessage::new("result here", "claude-sonnet-4.5")
+            .with_context(UserInputMessageContext::new().with_tool_results(vec![tool_result]));
+
+        let mut state = ConversationState::new("test")
+            .with_current_message(CurrentMessage::new(current))
+            .with_history(vec![assistant_msg]);
+
+        let config = CompressionConfig::default();
+        let _stats = compress(&mut state, &config);
+
+        let text = state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tool_results[0]
+            .content[0]["text"]
+            .as_str()
+            .unwrap();
+        assert_eq!(text, ".", "current_message 中空 text 应被修复为 '.'");
+    }
+
+    #[test]
+    fn test_repair_tool_result_whitespace_only_text() {
+        // text 为纯空白（如 "  \n  "）时也应被修复
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "text".to_string(),
+            serde_json::Value::String("  \n  ".to_string()),
+        );
+
+        let tool_result = ToolResult {
+            tool_use_id: "t3".to_string(),
+            content: vec![map],
+            status: Some("success".to_string()),
+            is_error: false,
+        };
+
+        let tool_use = ToolUseEntry::new("t3", "search");
+        let assistant_msg = Message::Assistant(HistoryAssistantMessage {
+            assistant_response_message: AssistantMessage::new("searching")
+                .with_tool_uses(vec![tool_use]),
+        });
+
+        let user_msg = Message::User(HistoryUserMessage {
+            user_input_message: UserMessage::new("go", "claude-sonnet-4.5")
+                .with_context(UserInputMessageContext::new().with_tool_results(vec![tool_result])),
+        });
+
+        let mut state = ConversationState::new("test")
+            .with_current_message(CurrentMessage::new(UserInputMessage::new(
+                "next",
+                "claude-sonnet-4.5",
+            )))
+            .with_history(vec![assistant_msg, user_msg]);
+
+        let config = CompressionConfig::default();
+        let _stats = compress(&mut state, &config);
+
+        if let Message::User(u) = &state.history[1] {
+            let text =
+                u.user_input_message.user_input_message_context.tool_results[0].content[0]["text"]
+                    .as_str()
+                    .unwrap();
+            assert_eq!(text, ".", "纯空白 text 应被修复为 '.'");
+        } else {
+            panic!("expected User message");
+        }
+    }
+
+    #[test]
+    fn test_repair_tool_result_nonempty_text_unchanged() {
+        // text 有实际内容时不应被修改
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "text".to_string(),
+            serde_json::Value::String("hello".to_string()),
+        );
+
+        let tool_result = ToolResult {
+            tool_use_id: "t4".to_string(),
+            content: vec![map],
+            status: Some("success".to_string()),
+            is_error: false,
+        };
+
+        let tool_use = ToolUseEntry::new("t4", "echo");
+        let assistant_msg = Message::Assistant(HistoryAssistantMessage {
+            assistant_response_message: AssistantMessage::new("echoing")
+                .with_tool_uses(vec![tool_use]),
+        });
+
+        let user_msg = Message::User(HistoryUserMessage {
+            user_input_message: UserMessage::new("go", "claude-sonnet-4.5")
+                .with_context(UserInputMessageContext::new().with_tool_results(vec![tool_result])),
+        });
+
+        let mut state = ConversationState::new("test")
+            .with_current_message(CurrentMessage::new(UserInputMessage::new(
+                "next",
+                "claude-sonnet-4.5",
+            )))
+            .with_history(vec![assistant_msg, user_msg]);
+
+        let config = CompressionConfig::default();
+        let _stats = compress(&mut state, &config);
+
+        if let Message::User(u) = &state.history[1] {
+            let text =
+                u.user_input_message.user_input_message_context.tool_results[0].content[0]["text"]
+                    .as_str()
+                    .unwrap();
+            assert_eq!(text, "hello", "非空 text 不应被修改");
+        } else {
+            panic!("expected User message");
+        }
     }
 }
