@@ -5,7 +5,7 @@
 //! 模拟人类使用模式，降低被检测风险。
 //! 参考 CLIProxyAPIPlus 的实现。
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -114,7 +114,7 @@ impl Default for CredentialRateState {
 ///
 /// 管理所有凭据的速率限制状态
 pub struct RateLimiter {
-    config: RateLimitConfig,
+    config: RwLock<RateLimitConfig>,
     states: Mutex<HashMap<u64, CredentialRateState>>,
 }
 
@@ -122,7 +122,7 @@ impl RateLimiter {
     /// 创建新的速率限制器
     pub fn new(config: RateLimitConfig) -> Self {
         Self {
-            config,
+            config: RwLock::new(config),
             states: Mutex::new(HashMap::new()),
         }
     }
@@ -132,10 +132,16 @@ impl RateLimiter {
         Self::new(RateLimitConfig::default())
     }
 
+    /// 热更新速率限制配置
+    pub fn update_config(&self, new_config: RateLimitConfig) {
+        *self.config.write() = new_config;
+    }
+
     /// 检查凭据是否可以发送请求
     ///
     /// 返回 `Ok(())` 表示可以发送，`Err(Duration)` 表示需要等待的时间
     pub fn check_rate_limit(&self, credential_id: u64) -> Result<(), Duration> {
+        let config = self.config.read().clone();
         let mut states = self.states.lock();
         let state = states.entry(credential_id).or_default();
         let now = Instant::now();
@@ -147,7 +153,7 @@ impl RateLimiter {
         }
 
         // 检查每日限制
-        if state.daily_count >= self.config.daily_max_requests {
+        if state.daily_count >= config.daily_max_requests {
             let wait_time = state.count_reset_at.saturating_duration_since(now);
             return Err(wait_time);
         }
@@ -163,7 +169,7 @@ impl RateLimiter {
 
         // 检查请求间隔
         if let Some(last_request) = state.last_request_at {
-            let min_interval = self.calculate_interval();
+            let min_interval = Self::calculate_interval_with_config(&config);
             let elapsed = now.saturating_duration_since(last_request);
             if elapsed < min_interval {
                 return Err(min_interval - elapsed);
@@ -182,7 +188,8 @@ impl RateLimiter {
     ///
     /// 返回 `Ok(())` 表示已占用一个发送窗口；`Err(Duration)` 表示需要等待的时间。
     pub fn try_acquire(&self, credential_id: u64) -> Result<(), Duration> {
-        let min_interval = self.calculate_interval();
+        let config = self.config.read().clone();
+        let min_interval = Self::calculate_interval_with_config(&config);
 
         let mut states = self.states.lock();
         let state = states.entry(credential_id).or_default();
@@ -195,7 +202,7 @@ impl RateLimiter {
         }
 
         // 检查每日限制
-        if state.daily_count >= self.config.daily_max_requests {
+        if state.daily_count >= config.daily_max_requests {
             let wait_time = state.count_reset_at.saturating_duration_since(now);
             return Err(wait_time);
         }
@@ -237,6 +244,9 @@ impl RateLimiter {
     ///
     /// 返回下次可以重试的等待时间
     pub fn record_failure(&self, credential_id: u64, error_message: Option<&str>) -> Duration {
+        // 先获取 config 读锁，再获取 states 锁（与 check_rate_limit/try_acquire 保持一致）
+        let config = self.config.read().clone();
+
         let mut states = self.states.lock();
         let state = states.entry(credential_id).or_default();
         let now = Instant::now();
@@ -257,7 +267,7 @@ impl RateLimiter {
             // 暂停检测触发长时间退避（1 小时）
             Duration::from_secs(3600)
         } else {
-            self.calculate_backoff(state.consecutive_failures)
+            Self::calculate_backoff_with_config(&config, state.consecutive_failures)
         };
 
         state.backoff_until = Some(now + backoff);
@@ -266,12 +276,13 @@ impl RateLimiter {
 
     /// 获取凭据的当前状态
     pub fn get_state(&self, credential_id: u64) -> Option<RateLimitState> {
+        let config = self.config.read();
         let states = self.states.lock();
         states.get(&credential_id).map(|s| {
             let now = Instant::now();
             RateLimitState {
                 daily_count: s.daily_count,
-                daily_remaining: self.config.daily_max_requests.saturating_sub(s.daily_count),
+                daily_remaining: config.daily_max_requests.saturating_sub(s.daily_count),
                 consecutive_failures: s.consecutive_failures,
                 is_in_backoff: s.backoff_until.map(|t| now < t).unwrap_or(false),
                 backoff_remaining_ms: s
@@ -297,31 +308,43 @@ impl RateLimiter {
 
     /// 计算请求间隔（带抖动）
     fn calculate_interval(&self) -> Duration {
-        let base = (self.config.min_interval_ms + self.config.max_interval_ms) / 2;
-        let jitter_range = (base as f64 * self.config.jitter_percent) as u64;
+        let config = self.config.read();
+        Self::calculate_interval_with_config(&config)
+    }
+
+    /// 使用指定配置计算请求间隔（避免重复获取读锁）
+    fn calculate_interval_with_config(config: &RateLimitConfig) -> Duration {
+        let base = (config.min_interval_ms + config.max_interval_ms) / 2;
+        let jitter_range = (base as f64 * config.jitter_percent) as u64;
         let jitter = if jitter_range > 0 {
             fastrand::u64(0..=jitter_range * 2) as i64 - jitter_range as i64
         } else {
             0
         };
         let interval = (base as i64 + jitter)
-            .max(self.config.min_interval_ms as i64)
-            .min(self.config.max_interval_ms as i64) as u64;
+            .max(config.min_interval_ms as i64)
+            .min(config.max_interval_ms as i64) as u64;
         Duration::from_millis(interval)
     }
 
     /// 计算指数退避时间
     fn calculate_backoff(&self, failures: u32) -> Duration {
-        let base = self.config.backoff_base_ms as f64;
-        let multiplier = self.config.backoff_multiplier;
-        let max = self.config.backoff_max_ms;
+        let config = self.config.read();
+        Self::calculate_backoff_with_config(&config, failures)
+    }
+
+    /// 使用指定配置计算指数退避时间（避免重复获取读锁）
+    fn calculate_backoff_with_config(config: &RateLimitConfig, failures: u32) -> Duration {
+        let base = config.backoff_base_ms as f64;
+        let multiplier = config.backoff_multiplier;
+        let max = config.backoff_max_ms;
 
         // 指数退避：base * multiplier^(failures-1)
         let backoff = base * multiplier.powi((failures.saturating_sub(1)) as i32);
         let backoff_ms = (backoff as u64).min(max);
 
         // 添加抖动
-        let jitter_range = (backoff_ms as f64 * self.config.jitter_percent) as u64;
+        let jitter_range = (backoff_ms as f64 * config.jitter_percent) as u64;
         let jitter = if jitter_range > 0 {
             fastrand::u64(0..=jitter_range)
         } else {

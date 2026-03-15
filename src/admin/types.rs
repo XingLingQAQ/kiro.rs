@@ -352,3 +352,63 @@ impl AdminErrorResponse {
         Self::new("internal_error", message)
     }
 }
+
+// ============ 全局配置 ============
+
+/// 全局配置响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalConfigResponse {
+    /// AWS Region
+    pub region: String,
+    /// 单凭据目标请求速率（RPM），None 表示无限制
+    pub credential_rpm: Option<u32>,
+    /// 压缩配置
+    pub compression: CompressionConfigResponse,
+}
+
+/// 压缩配置响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompressionConfigResponse {
+    pub enabled: bool,
+    pub whitespace_compression: bool,
+    pub thinking_strategy: String,
+    pub tool_result_max_chars: usize,
+    pub tool_result_head_lines: usize,
+    pub tool_result_tail_lines: usize,
+    pub tool_use_input_max_chars: usize,
+    pub tool_description_max_chars: usize,
+    pub max_history_turns: usize,
+    pub max_history_chars: usize,
+    pub max_request_body_bytes: usize,
+}
+
+/// 更新全局配置请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateGlobalConfigRequest {
+    /// AWS Region（可选）
+    pub region: Option<String>,
+    /// 单凭据目标请求速率（RPM，可选）
+    pub credential_rpm: Option<Option<u32>>,
+    /// 压缩配置（可选）
+    pub compression: Option<UpdateCompressionConfigRequest>,
+}
+
+/// 更新压缩配置请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCompressionConfigRequest {
+    pub enabled: Option<bool>,
+    pub whitespace_compression: Option<bool>,
+    pub thinking_strategy: Option<String>,
+    pub tool_result_max_chars: Option<usize>,
+    pub tool_result_head_lines: Option<usize>,
+    pub tool_result_tail_lines: Option<usize>,
+    pub tool_use_input_max_chars: Option<usize>,
+    pub tool_description_max_chars: Option<usize>,
+    pub max_history_turns: Option<usize>,
+    pub max_history_chars: Option<usize>,
+    pub max_request_body_bytes: Option<usize>,
+}

@@ -64,8 +64,8 @@ impl KiroProvider {
     ///
     /// 重建 default_client 并清空 client_cache
     pub fn update_global_proxy(&self, proxy: Option<ProxyConfig>) -> anyhow::Result<()> {
-        let new_client =
-            build_client(proxy.as_ref(), 720, self.token_manager.config().tls_backend)?;
+        let config = self.token_manager.config();
+        let new_client = build_client(proxy.as_ref(), 720, config.tls_backend)?;
 
         *self.global_proxy.write() = proxy;
         *self.default_client.write() = new_client;
@@ -96,15 +96,12 @@ impl KiroProvider {
         }
 
         // 创建新 client 并缓存
-        let client = build_client(
-            effective_proxy.as_ref(),
-            720,
-            self.token_manager.config().tls_backend,
-        )
-        .unwrap_or_else(|e| {
-            tracing::warn!("创建凭据级代理 client 失败，使用默认 client: {}", e);
-            self.default_client.read().clone()
-        });
+        let config = self.token_manager.config();
+        let client = build_client(effective_proxy.as_ref(), 720, config.tls_backend)
+            .unwrap_or_else(|e| {
+                tracing::warn!("创建凭据级代理 client 失败，使用默认 client: {}", e);
+                self.default_client.read().clone()
+            });
 
         {
             let mut cache = self.client_cache.lock();
@@ -122,25 +119,28 @@ impl KiroProvider {
 
     /// 获取 API 基础 URL（使用凭据级 effective_api_region）
     fn base_url(&self, credentials: &KiroCredentials) -> String {
+        let config = self.token_manager.config();
         format!(
             "https://q.{}.amazonaws.com/generateAssistantResponse",
-            credentials.effective_api_region(self.token_manager.config())
+            credentials.effective_api_region(&config)
         )
     }
 
     /// 获取 MCP API URL（使用凭据级 effective_api_region）
     fn mcp_url(&self, credentials: &KiroCredentials) -> String {
+        let config = self.token_manager.config();
         format!(
             "https://q.{}.amazonaws.com/mcp",
-            credentials.effective_api_region(self.token_manager.config())
+            credentials.effective_api_region(&config)
         )
     }
 
     /// 获取 API 基础域名（使用凭据级 effective_api_region）
     fn base_domain(&self, credentials: &KiroCredentials) -> String {
+        let config = self.token_manager.config();
         format!(
             "q.{}.amazonaws.com",
-            credentials.effective_api_region(self.token_manager.config())
+            credentials.effective_api_region(&config)
         )
     }
 
@@ -176,7 +176,7 @@ impl KiroProvider {
     fn build_headers(&self, ctx: &CallContext) -> anyhow::Result<HeaderMap> {
         let config = self.token_manager.config();
 
-        let machine_id = machine_id::generate_from_credentials(&ctx.credentials, config)
+        let machine_id = machine_id::generate_from_credentials(&ctx.credentials, &config)
             .ok_or_else(|| anyhow::anyhow!("无法生成 machine_id，请检查凭证配置"))?;
 
         let kiro_version = &config.kiro_version;
@@ -231,7 +231,7 @@ impl KiroProvider {
     fn build_mcp_headers(&self, ctx: &CallContext) -> anyhow::Result<HeaderMap> {
         let config = self.token_manager.config();
 
-        let machine_id = machine_id::generate_from_credentials(&ctx.credentials, config)
+        let machine_id = machine_id::generate_from_credentials(&ctx.credentials, &config)
             .ok_or_else(|| anyhow::anyhow!("无法生成 machine_id，请检查凭证配置"))?;
 
         let kiro_version = &config.kiro_version;

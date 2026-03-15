@@ -17,8 +17,10 @@ import {
   importTokenJson,
   getProxyConfig,
   updateProxyConfig,
+  getGlobalConfig,
+  updateGlobalConfig,
 } from '@/api/credentials'
-import type { AddCredentialRequest, ImportTokenJsonRequest } from '@/types/api'
+import type { AddCredentialRequest, ImportTokenJsonRequest, UpdateGlobalConfigRequest } from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials() {
@@ -193,6 +195,30 @@ export function useUpdateProxyConfig() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['proxyConfig'] })
       toast.success('全局代理配置已更新')
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.error?.message || '更新失败')
+    },
+  })
+}
+
+// 查询全局配置
+export function useGlobalConfig() {
+  return useQuery({
+    queryKey: ['globalConfig'],
+    queryFn: getGlobalConfig,
+  })
+}
+
+// 更新全局配置
+export function useUpdateGlobalConfig() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (req: UpdateGlobalConfigRequest) => updateGlobalConfig(req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['globalConfig'] })
+      queryClient.invalidateQueries({ queryKey: ['proxyConfig'] })
+      toast.success('全局配置已更新')
     },
     onError: (error: any) => {
       toast.error(error.response?.data?.error?.message || '更新失败')

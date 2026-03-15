@@ -622,6 +622,9 @@ pub async fn post_messages(
     State(state): State<AppState>,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
+    // 读取压缩配置快照（读锁 + clone，避免持锁跨 await）
+    let compression_config = state.compression_config.read().clone();
+
     // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
     override_thinking_from_model_name(&mut payload);
 
@@ -675,7 +678,7 @@ pub async fn post_messages(
     }
 
     // 转换请求
-    let conversion_result = match convert_request(&payload, &state.compression_config) {
+    let conversion_result = match convert_request(&payload, &compression_config) {
         Ok(result) => result,
         Err(e) => {
             let (error_type, message) = match &e {
@@ -735,12 +738,12 @@ pub async fn post_messages(
     };
 
     // 请求体大小预检（上游存在硬性请求体大小限制；按实际序列化后的总字节数判断）
-    let max_body = state.compression_config.max_request_body_bytes;
-    if max_body > 0 && request_body.len() > max_body && state.compression_config.enabled {
+    let max_body = compression_config.max_request_body_bytes;
+    if max_body > 0 && request_body.len() > max_body && compression_config.enabled {
         // 自适应二次压缩：按 request_body_bytes 迭代截断，尽量把请求缩到阈值内
         match adaptive_shrink_request_body(
             &mut kiro_request,
-            &state.compression_config,
+            &compression_config,
             max_body,
             &mut request_body,
         ) {
@@ -1281,6 +1284,9 @@ pub async fn post_messages_cc(
     State(state): State<AppState>,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
+    // 读取压缩配置快照（读锁 + clone，避免持锁跨 await）
+    let compression_config = state.compression_config.read().clone();
+
     // 检查 KiroProvider 是否可用
     let provider = match &state.kiro_provider {
         Some(p) => p.clone(),
@@ -1331,7 +1337,7 @@ pub async fn post_messages_cc(
     }
 
     // 转换请求
-    let conversion_result = match convert_request(&payload, &state.compression_config) {
+    let conversion_result = match convert_request(&payload, &compression_config) {
         Ok(result) => result,
         Err(e) => {
             let (error_type, message) = match &e {
@@ -1391,12 +1397,12 @@ pub async fn post_messages_cc(
     };
 
     // 请求体大小预检（上游存在硬性请求体大小限制；按实际序列化后的总字节数判断）
-    let max_body = state.compression_config.max_request_body_bytes;
-    if max_body > 0 && request_body.len() > max_body && state.compression_config.enabled {
+    let max_body = compression_config.max_request_body_bytes;
+    if max_body > 0 && request_body.len() > max_body && compression_config.enabled {
         // 自适应二次压缩：按 request_body_bytes 迭代截断，尽量把请求缩到阈值内
         match adaptive_shrink_request_body(
             &mut kiro_request,
-            &state.compression_config,
+            &compression_config,
             max_body,
             &mut request_body,
         ) {

@@ -8,6 +8,7 @@ use axum::{
     middleware,
     routing::{get, post},
 };
+use parking_lot::RwLock;
 
 use crate::kiro::provider::KiroProvider;
 use crate::model::config::CompressionConfig;
@@ -41,7 +42,7 @@ pub fn create_router_with_provider(
     api_key: impl Into<String>,
     kiro_provider: Option<Arc<KiroProvider>>,
     profile_arn: Option<String>,
-    compression_config: CompressionConfig,
+    compression_config: Arc<RwLock<CompressionConfig>>,
 ) -> Router {
     let mut state = AppState::new(api_key);
     if let Some(provider) = kiro_provider {

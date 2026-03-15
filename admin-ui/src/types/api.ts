@@ -322,3 +322,45 @@ export interface UpdateProxyConfigRequest {
   proxyUsername?: string | null
   proxyPassword?: string | null
 }
+
+// ============ 全局配置 ============
+
+export interface CompressionConfigResponse {
+  enabled: boolean
+  whitespaceCompression: boolean
+  thinkingStrategy: string
+  toolResultMaxChars: number
+  toolResultHeadLines: number
+  toolResultTailLines: number
+  toolUseInputMaxChars: number
+  toolDescriptionMaxChars: number
+  maxHistoryTurns: number
+  maxHistoryChars: number
+  maxRequestBodyBytes: number
+}
+
+export interface GlobalConfigResponse {
+  region: string
+  credentialRpm: number | null
+  compression: CompressionConfigResponse
+}
+
+export interface UpdateCompressionConfigRequest {
+  enabled?: boolean
+  whitespaceCompression?: boolean
+  thinkingStrategy?: string
+  toolResultMaxChars?: number
+  toolResultHeadLines?: number
+  toolResultTailLines?: number
+  toolUseInputMaxChars?: number
+  toolDescriptionMaxChars?: number
+  maxHistoryTurns?: number
+  maxHistoryChars?: number
+  maxRequestBodyBytes?: number
+}
+
+export interface UpdateGlobalConfigRequest {
+  region?: string
+  credentialRpm?: number | null
+  compression?: UpdateCompressionConfigRequest
+}

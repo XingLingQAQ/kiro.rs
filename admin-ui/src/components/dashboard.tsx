@@ -11,7 +11,8 @@ import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { ImportTokenJsonDialog } from '@/components/import-token-json-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
 import { ProxyConfigDialog } from '@/components/proxy-config-dialog'
-import { useCredentials, useCachedBalances, useDeleteCredential, useResetFailure, useProxyConfig } from '@/hooks/use-credentials'
+import { GlobalConfigDialog } from '@/components/global-config-dialog'
+import { useCredentials, useCachedBalances, useDeleteCredential, useResetFailure, useProxyConfig, useGlobalConfig } from '@/hooks/use-credentials'
 import { getCredentialBalance } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -33,6 +34,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false)
   const [proxyConfigDialogOpen, setProxyConfigDialogOpen] = useState(false)
+  const [globalConfigDialogOpen, setGlobalConfigDialogOpen] = useState(false)
   const [verifying, setVerifying] = useState(false)
   const [verifyProgress, setVerifyProgress] = useState({ current: 0, total: 0 })
   const [verifyResults, setVerifyResults] = useState<Map<number, VerifyResult>>(new Map())
@@ -58,6 +60,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { mutate: deleteCredential } = useDeleteCredential()
   const { mutate: resetFailure } = useResetFailure()
   const { data: proxyConfig } = useProxyConfig()
+  const { data: globalConfig } = useGlobalConfig()
 
   // 构建 id -> cachedBalance 的映射
   const cachedBalanceMap = new Map(
@@ -567,17 +570,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
           </Card>
           <Card
             className="cursor-pointer hover:border-primary/50 transition-colors"
-            onClick={() => setProxyConfigDialogOpen(true)}
+            onClick={() => setGlobalConfigDialogOpen(true)}
           >
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
                 <Globe className="h-4 w-4" />
-                全局代理
+                全局配置
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-sm font-medium truncate">
-                {proxyConfig?.proxyUrl || '未配置'}
+              <div className="text-xs space-y-0.5">
+                <div className="truncate">{globalConfig?.region || '-'} | RPM: {globalConfig?.credentialRpm ?? '默认'}</div>
+                <div className="truncate">代理: {proxyConfig?.proxyUrl || '无'} | 压缩: {globalConfig?.compression.enabled ? '开' : '关'}</div>
               </div>
             </CardContent>
           </Card>
@@ -765,7 +769,13 @@ export function Dashboard({ onLogout }: DashboardProps) {
         onOpenChange={setImportDialogOpen}
       />
 
-      {/* 全局代理配置对话框 */}
+      {/* 全局配置对话框 */}
+      <GlobalConfigDialog
+        open={globalConfigDialogOpen}
+        onOpenChange={setGlobalConfigDialogOpen}
+      />
+
+      {/* 全局代理配置对话框（保留兼容） */}
       <ProxyConfigDialog
         open={proxyConfigDialogOpen}
         onOpenChange={setProxyConfigDialogOpen}

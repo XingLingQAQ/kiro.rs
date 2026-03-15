@@ -13,7 +13,7 @@ use crate::http_client::ProxyConfig;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::provider::KiroProvider;
 use crate::kiro::token_manager::MultiTokenManager;
-use crate::model::config::Config;
+use crate::model::config::{CompressionConfig, Config};
 use parking_lot::RwLock;
 
 use super::error::AdminServiceError;
@@ -43,6 +43,7 @@ pub struct AdminService {
     token_manager: Arc<MultiTokenManager>,
     kiro_provider: Option<Arc<KiroProvider>>,
     config: Arc<RwLock<Config>>,
+    compression_config: Arc<RwLock<CompressionConfig>>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
 }
@@ -52,6 +53,7 @@ impl AdminService {
         token_manager: Arc<MultiTokenManager>,
         kiro_provider: Option<Arc<KiroProvider>>,
         config: Arc<RwLock<Config>>,
+        compression_config: Arc<RwLock<CompressionConfig>>,
     ) -> Self {
         let cache_path = token_manager
             .cache_dir()
@@ -63,6 +65,7 @@ impl AdminService {
             token_manager,
             kiro_provider,
             config,
+            compression_config,
             balance_cache: Mutex::new(balance_cache),
             cache_path,
         }
@@ -643,9 +646,11 @@ impl AdminService {
             } else {
                 let mut proxy = ProxyConfig::new(url.trim());
                 if let (Some(u), Some(p)) = (&req.proxy_username, &req.proxy_password)
-                    && !u.trim().is_empty() && !p.trim().is_empty() {
-                        proxy = proxy.with_auth(u.trim(), p.trim());
-                    }
+                    && !u.trim().is_empty()
+                    && !p.trim().is_empty()
+                {
+                    proxy = proxy.with_auth(u.trim(), p.trim());
+                }
                 // 如果未提供新认证信息，保留现有认证
                 if proxy.username.is_none() {
                     let config = self.config.read();
@@ -684,5 +689,123 @@ impl AdminService {
         crate::token::update_proxy(new_proxy);
 
         Ok(())
+    }
+
+    /// 获取全局配置
+    pub fn get_global_config(&self) -> super::types::GlobalConfigResponse {
+        let config = self.config.read();
+        let c = self.compression_config.read();
+        super::types::GlobalConfigResponse {
+            region: config.region.clone(),
+            credential_rpm: config.credential_rpm,
+            compression: super::types::CompressionConfigResponse {
+                enabled: c.enabled,
+                whitespace_compression: c.whitespace_compression,
+                thinking_strategy: c.thinking_strategy.clone(),
+                tool_result_max_chars: c.tool_result_max_chars,
+                tool_result_head_lines: c.tool_result_head_lines,
+                tool_result_tail_lines: c.tool_result_tail_lines,
+                tool_use_input_max_chars: c.tool_use_input_max_chars,
+                tool_description_max_chars: c.tool_description_max_chars,
+                max_history_turns: c.max_history_turns,
+                max_history_chars: c.max_history_chars,
+                max_request_body_bytes: c.max_request_body_bytes,
+            },
+        }
+    }
+
+    /// 更新全局配置
+    pub async fn update_global_config(
+        &self,
+        req: super::types::UpdateGlobalConfigRequest,
+    ) -> Result<(), AdminServiceError> {
+        // 1. 先持久化配置（失败时不影响运行时状态）
+        {
+            let mut config = self.config.write();
+
+            if let Some(region) = &req.region {
+                let trimmed = region.trim();
+                if trimmed.is_empty() {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "Region 不能为空".to_string(),
+                    ));
+                }
+                config.region = trimmed.to_string();
+            }
+
+            if let Some(rpm) = req.credential_rpm {
+                config.credential_rpm = rpm;
+            }
+
+            if let Some(c) = &req.compression {
+                Self::apply_compression_fields(&mut config.compression, c);
+            }
+
+            config
+                .save()
+                .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        }
+
+        // 2. 持久化成功后再应用运行时变更
+        let config = self.config.read();
+
+        // 热更新 region
+        if req.region.is_some() {
+            self.token_manager.update_region(config.region.clone());
+        }
+
+        // 热更新 credential_rpm
+        if req.credential_rpm.is_some() {
+            self.token_manager
+                .update_credential_rpm(config.credential_rpm);
+        }
+
+        // 热更新压缩配置到运行时 Arc<RwLock<CompressionConfig>>
+        if let Some(c) = &req.compression {
+            let mut runtime = self.compression_config.write();
+            Self::apply_compression_fields(&mut runtime, c);
+        }
+
+        Ok(())
+    }
+
+    /// 将更新请求中的压缩字段应用到目标 CompressionConfig
+    fn apply_compression_fields(
+        target: &mut CompressionConfig,
+        src: &super::types::UpdateCompressionConfigRequest,
+    ) {
+        if let Some(v) = src.enabled {
+            target.enabled = v;
+        }
+        if let Some(v) = src.whitespace_compression {
+            target.whitespace_compression = v;
+        }
+        if let Some(ref v) = src.thinking_strategy {
+            target.thinking_strategy = v.clone();
+        }
+        if let Some(v) = src.tool_result_max_chars {
+            target.tool_result_max_chars = v;
+        }
+        if let Some(v) = src.tool_result_head_lines {
+            target.tool_result_head_lines = v;
+        }
+        if let Some(v) = src.tool_result_tail_lines {
+            target.tool_result_tail_lines = v;
+        }
+        if let Some(v) = src.tool_use_input_max_chars {
+            target.tool_use_input_max_chars = v;
+        }
+        if let Some(v) = src.tool_description_max_chars {
+            target.tool_description_max_chars = v;
+        }
+        if let Some(v) = src.max_history_turns {
+            target.max_history_turns = v;
+        }
+        if let Some(v) = src.max_history_chars {
+            target.max_history_chars = v;
+        }
+        if let Some(v) = src.max_request_body_bytes {
+            target.max_request_body_bytes = v;
+        }
     }
 }

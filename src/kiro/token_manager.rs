@@ -634,7 +634,7 @@ const LOW_BALANCE_THRESHOLD: f64 = 1.0;
 /// - **优雅降级**: Token 刷新失败时使用现有 Token
 #[allow(dead_code)]
 pub struct MultiTokenManager {
-    config: Config,
+    config: RwLock<Config>,
     proxy: RwLock<Option<ProxyConfig>>,
     /// 凭据条目列表
     entries: Mutex<Vec<CredentialEntry>>,
@@ -863,7 +863,7 @@ impl MultiTokenManager {
             .collect();
 
         let manager = Self {
-            config,
+            config: RwLock::new(config),
             proxy: RwLock::new(proxy),
             entries: Mutex::new(entries),
             refresh_lock: TokioMutex::new(()),
@@ -896,14 +896,35 @@ impl MultiTokenManager {
         Ok(manager)
     }
 
-    /// 获取配置的引用
-    pub fn config(&self) -> &Config {
-        &self.config
+    /// 获取配置的克隆
+    pub fn config(&self) -> Config {
+        self.config.read().clone()
     }
 
     /// 热更新代理配置
     pub fn update_proxy(&self, proxy: Option<ProxyConfig>) {
         *self.proxy.write() = proxy;
+    }
+
+    /// 热更新全局 Region
+    pub fn update_region(&self, region: String) {
+        self.config.write().region = region;
+    }
+
+    /// 热更新单凭据目标请求速率（RPM）
+    pub fn update_credential_rpm(&self, rpm: Option<u32>) {
+        // 更新 config 中的 credential_rpm
+        self.config.write().credential_rpm = rpm;
+
+        // 重新计算 RateLimitConfig 并应用到 rate_limiter
+        let mut cfg = RateLimitConfig::default();
+        if let Some(rpm) = rpm.filter(|&v| v > 0) {
+            let interval_ms = (60_000u64 / rpm as u64).max(1);
+            cfg.min_interval_ms = interval_ms;
+            cfg.max_interval_ms = interval_ms;
+            cfg.jitter_percent = 0.0;
+        }
+        self.rate_limiter.update_config(cfg);
     }
 
     /// 获取凭据总数
@@ -1005,7 +1026,7 @@ impl MultiTokenManager {
             disabled_total = disabled_total,
             tried = tried_ids.len(),
             tried_ids = ?tried_ids,
-            config_credential_rpm = ?self.config.credential_rpm,
+            config_credential_rpm = ?self.config.read().credential_rpm,
             min_wait_ms = ?min_wait_ms,
             min_wait_from_id = ?min_wait_from_id,
             min_wait_source = ?min_wait_source,
@@ -1510,6 +1531,9 @@ impl MultiTokenManager {
         id: u64,
         credentials: &KiroCredentials,
     ) -> anyhow::Result<CallContext> {
+        // 获取配置快照（避免跨 await 持有读锁）
+        let config = self.config.read().clone();
+
         let token_missing_or_truncated = |creds: &KiroCredentials| {
             creds
                 .access_token
@@ -1543,7 +1567,7 @@ impl MultiTokenManager {
                 // 确实需要刷新
                 let proxy = self.proxy.read().clone();
                 let new_creds =
-                    refresh_token_with_id(&current_creds, &self.config, proxy.as_ref(), id).await?;
+                    refresh_token_with_id(&current_creds, &config, proxy.as_ref(), id).await?;
 
                 if is_token_expired(&new_creds) {
                     anyhow::bail!("刷新后的 Token 仍然无效或已过期");
@@ -2009,9 +2033,10 @@ impl MultiTokenManager {
     /// 获取使用额度信息
     #[allow(dead_code)]
     pub async fn get_usage_limits(&self) -> anyhow::Result<UsageLimitsResponse> {
+        let config = self.config.read().clone();
         let ctx = self.acquire_context().await?;
         let proxy = self.proxy.read().clone();
-        get_usage_limits(&ctx.credentials, &self.config, &ctx.token, proxy.as_ref()).await
+        get_usage_limits(&ctx.credentials, &config, &ctx.token, proxy.as_ref()).await
     }
 
     /// 初始化所有凭据的余额缓存
@@ -2212,6 +2237,7 @@ impl MultiTokenManager {
 
     /// 获取指定凭据的使用额度（Admin API）
     pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
+        let config = self.config.read().clone();
         let credentials = {
             let entries = self.entries.lock();
             entries
@@ -2238,7 +2264,7 @@ impl MultiTokenManager {
             if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
                 let proxy = self.proxy.read().clone();
                 let new_creds =
-                    refresh_token_with_id(&current_creds, &self.config, proxy.as_ref(), id).await?;
+                    refresh_token_with_id(&current_creds, &config, proxy.as_ref(), id).await?;
                 {
                     let mut entries = self.entries.lock();
                     if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
@@ -2276,7 +2302,8 @@ impl MultiTokenManager {
         };
 
         let proxy = self.proxy.read().clone();
-        get_usage_limits(&credentials, &self.config, &token, proxy.as_ref()).await
+        let config = self.config.read().clone();
+        get_usage_limits(&credentials, &config, &token, proxy.as_ref()).await
     }
 
     /// 添加新凭据（Admin API）
@@ -2293,6 +2320,7 @@ impl MultiTokenManager {
     /// - `Ok(u64)` - 新凭据 ID
     /// - `Err(_)` - 验证失败或添加失败
     pub async fn add_credential(&self, new_cred: KiroCredentials) -> anyhow::Result<u64> {
+        let config = self.config.read().clone();
         // 1. 基本验证
         validate_refresh_token(&new_cred)?;
 
@@ -2318,7 +2346,7 @@ impl MultiTokenManager {
 
         // 3. 尝试刷新 Token 验证凭据有效性
         let proxy = self.proxy.read().clone();
-        let mut validated_cred = refresh_token(&new_cred, &self.config, proxy.as_ref()).await?;
+        let mut validated_cred = refresh_token(&new_cred, &config, proxy.as_ref()).await?;
 
         // 4. 分配新 ID
         let new_id = {
@@ -2564,6 +2592,7 @@ impl MultiTokenManager {
     /// 如果刷新失败但现有 Token 仍有效，返回现有 Token（优雅降级）
     #[allow(dead_code)]
     pub async fn refresh_token_for_credential(&self, id: u64) -> anyhow::Result<RefreshResult> {
+        let config = self.config.read().clone();
         let credentials = {
             let entries = self.entries.lock();
             entries
@@ -2575,7 +2604,7 @@ impl MultiTokenManager {
 
         // 尝试刷新
         let proxy = self.proxy.read().clone();
-        match refresh_token_with_id(&credentials, &self.config, proxy.as_ref(), id).await {
+        match refresh_token_with_id(&credentials, &config, proxy.as_ref(), id).await {
             Ok(new_creds) => {
                 // 更新凭据
                 {

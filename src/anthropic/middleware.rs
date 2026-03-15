@@ -9,6 +9,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Json, Response},
 };
+use parking_lot::RwLock;
 
 use crate::common::auth;
 use crate::kiro::provider::KiroProvider;
@@ -26,8 +27,8 @@ pub struct AppState {
     pub kiro_provider: Option<Arc<KiroProvider>>,
     /// Profile ARN（可选，用于请求）
     pub profile_arn: Option<String>,
-    /// 输入压缩配置
-    pub compression_config: CompressionConfig,
+    /// 输入压缩配置（共享引用，支持热更新）
+    pub compression_config: Arc<RwLock<CompressionConfig>>,
 }
 
 impl AppState {
@@ -37,7 +38,7 @@ impl AppState {
             api_key: api_key.into(),
             kiro_provider: None,
             profile_arn: None,
-            compression_config: CompressionConfig::default(),
+            compression_config: Arc::new(RwLock::new(CompressionConfig::default())),
         }
     }
 
@@ -53,8 +54,8 @@ impl AppState {
         self
     }
 
-    /// 设置压缩配置
-    pub fn with_compression_config(mut self, config: CompressionConfig) -> Self {
+    /// 设置压缩配置（接受共享引用）
+    pub fn with_compression_config(mut self, config: Arc<RwLock<CompressionConfig>>) -> Self {
         self.compression_config = config;
         self
     }

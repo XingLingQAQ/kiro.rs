@@ -153,3 +153,20 @@ pub async fn update_proxy_config(
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
+
+/// GET /api/admin/config/global - 获取全局配置
+pub async fn get_global_config(State(state): State<AdminState>) -> impl IntoResponse {
+    let response = state.service.get_global_config();
+    Json(response)
+}
+
+/// PUT /api/admin/config/global - 更新全局配置
+pub async fn update_global_config(
+    State(state): State<AdminState>,
+    Json(req): Json<super::types::UpdateGlobalConfigRequest>,
+) -> impl IntoResponse {
+    match state.service.update_global_config(req).await {
+        Ok(_) => Json(SuccessResponse::new("全局配置已更新")).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
