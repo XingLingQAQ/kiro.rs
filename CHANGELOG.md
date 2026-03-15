@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.9] - 2026-03-15
+
+### 新增
+- **Admin UI 凭据列表排序** — 支持按 ID 或余额对凭据列表进行排序
+- **全局配置热更新（region / credentialRpm / compression）** — 支持在 Admin UI 中实时修改全局 Region、单凭据目标 RPM 和输入压缩配置，无需重启服务
+
 ## [v1.1.8] - 2026-03-15
 
 ### Added
