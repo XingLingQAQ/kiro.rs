@@ -13,7 +13,7 @@
 
 use anyhow::bail;
 use chrono::{DateTime, Duration, Utc};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -635,7 +635,7 @@ const LOW_BALANCE_THRESHOLD: f64 = 1.0;
 #[allow(dead_code)]
 pub struct MultiTokenManager {
     config: Config,
-    proxy: Option<ProxyConfig>,
+    proxy: RwLock<Option<ProxyConfig>>,
     /// 凭据条目列表
     entries: Mutex<Vec<CredentialEntry>>,
     /// Token 刷新锁，确保同一时间只有一个刷新操作
@@ -864,7 +864,7 @@ impl MultiTokenManager {
 
         let manager = Self {
             config,
-            proxy,
+            proxy: RwLock::new(proxy),
             entries: Mutex::new(entries),
             refresh_lock: TokioMutex::new(()),
             credentials_path,
@@ -899,6 +899,11 @@ impl MultiTokenManager {
     /// 获取配置的引用
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// 热更新代理配置
+    pub fn update_proxy(&self, proxy: Option<ProxyConfig>) {
+        *self.proxy.write() = proxy;
     }
 
     /// 获取凭据总数
@@ -1536,9 +1541,9 @@ impl MultiTokenManager {
                 || is_token_expiring_soon(&current_creds)
             {
                 // 确实需要刷新
+                let proxy = self.proxy.read().clone();
                 let new_creds =
-                    refresh_token_with_id(&current_creds, &self.config, self.proxy.as_ref(), id)
-                        .await?;
+                    refresh_token_with_id(&current_creds, &self.config, proxy.as_ref(), id).await?;
 
                 if is_token_expired(&new_creds) {
                     anyhow::bail!("刷新后的 Token 仍然无效或已过期");
@@ -2005,13 +2010,8 @@ impl MultiTokenManager {
     #[allow(dead_code)]
     pub async fn get_usage_limits(&self) -> anyhow::Result<UsageLimitsResponse> {
         let ctx = self.acquire_context().await?;
-        get_usage_limits(
-            &ctx.credentials,
-            &self.config,
-            &ctx.token,
-            self.proxy.as_ref(),
-        )
-        .await
+        let proxy = self.proxy.read().clone();
+        get_usage_limits(&ctx.credentials, &self.config, &ctx.token, proxy.as_ref()).await
     }
 
     /// 初始化所有凭据的余额缓存
@@ -2236,9 +2236,9 @@ impl MultiTokenManager {
             };
 
             if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
+                let proxy = self.proxy.read().clone();
                 let new_creds =
-                    refresh_token_with_id(&current_creds, &self.config, self.proxy.as_ref(), id)
-                        .await?;
+                    refresh_token_with_id(&current_creds, &self.config, proxy.as_ref(), id).await?;
                 {
                     let mut entries = self.entries.lock();
                     if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
@@ -2275,7 +2275,8 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        get_usage_limits(&credentials, &self.config, &token, self.proxy.as_ref()).await
+        let proxy = self.proxy.read().clone();
+        get_usage_limits(&credentials, &self.config, &token, proxy.as_ref()).await
     }
 
     /// 添加新凭据（Admin API）
@@ -2316,8 +2317,8 @@ impl MultiTokenManager {
         }
 
         // 3. 尝试刷新 Token 验证凭据有效性
-        let mut validated_cred =
-            refresh_token(&new_cred, &self.config, self.proxy.as_ref()).await?;
+        let proxy = self.proxy.read().clone();
+        let mut validated_cred = refresh_token(&new_cred, &self.config, proxy.as_ref()).await?;
 
         // 4. 分配新 ID
         let new_id = {
@@ -2573,7 +2574,8 @@ impl MultiTokenManager {
         };
 
         // 尝试刷新
-        match refresh_token_with_id(&credentials, &self.config, self.proxy.as_ref(), id).await {
+        let proxy = self.proxy.read().clone();
+        match refresh_token_with_id(&credentials, &self.config, proxy.as_ref(), id).await {
             Ok(new_creds) => {
                 // 更新凭据
                 {

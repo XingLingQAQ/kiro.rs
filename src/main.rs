@@ -16,6 +16,7 @@ use kiro::provider::KiroProvider;
 use kiro::token_manager::MultiTokenManager;
 use model::arg::Args;
 use model::config::Config;
+use parking_lot::RwLock;
 
 #[tokio::main]
 async fn main() {
@@ -38,6 +39,7 @@ async fn main() {
         tracing::error!("加载配置失败: {}", e);
         std::process::exit(1);
     });
+    let config = Arc::new(RwLock::new(config));
 
     // 加载凭证（支持单对象或数组格式）
     let credentials_path = args
@@ -70,27 +72,33 @@ async fn main() {
     );
 
     // 获取 API Key
-    let api_key = config.api_key.clone().unwrap_or_else(|| {
+    let api_key = config.read().api_key.clone().unwrap_or_else(|| {
         tracing::error!("配置文件中未设置 apiKey");
         std::process::exit(1);
     });
 
     // 构建代理配置
-    let proxy_config = config.proxy_url.as_ref().map(|url| {
-        let mut proxy = http_client::ProxyConfig::new(url);
-        if let (Some(username), Some(password)) = (&config.proxy_username, &config.proxy_password) {
-            proxy = proxy.with_auth(username, password);
-        }
-        proxy
-    });
+    let proxy_config = {
+        let cfg = config.read();
+        cfg.proxy_url.as_ref().map(|url| {
+            let mut proxy = http_client::ProxyConfig::new(url);
+            if let (Some(username), Some(password)) = (&cfg.proxy_username, &cfg.proxy_password) {
+                proxy = proxy.with_auth(username, password);
+            }
+            proxy
+        })
+    };
 
     if proxy_config.is_some() {
-        tracing::info!("已配置 HTTP 代理: {}", config.proxy_url.as_ref().unwrap());
+        tracing::info!(
+            "已配置 HTTP 代理: {}",
+            config.read().proxy_url.as_ref().unwrap()
+        );
     }
 
     // 创建 MultiTokenManager 和 KiroProvider
     let token_manager = MultiTokenManager::new(
-        config.clone(),
+        config.read().clone(),
         credentials_list,
         proxy_config.clone(),
         Some(credentials_path.into()),
@@ -109,56 +117,71 @@ async fn main() {
     }
 
     let kiro_provider = KiroProvider::with_proxy(token_manager.clone(), proxy_config.clone());
+    let kiro_provider = Arc::new(kiro_provider);
 
     // 初始化 count_tokens 配置
-    token::init_config(token::CountTokensConfig {
-        api_url: config.count_tokens_api_url.clone(),
-        api_key: config.count_tokens_api_key.clone(),
-        auth_type: config.count_tokens_auth_type.clone(),
-        proxy: proxy_config,
-        tls_backend: config.tls_backend,
-    });
+    {
+        let cfg = config.read();
+        token::init_config(token::CountTokensConfig {
+            api_url: cfg.count_tokens_api_url.clone(),
+            api_key: cfg.count_tokens_api_key.clone(),
+            auth_type: cfg.count_tokens_auth_type.clone(),
+            proxy: proxy_config,
+            tls_backend: cfg.tls_backend,
+        });
+    }
 
     // 构建 Anthropic API 路由（从第一个凭据获取 profile_arn）
     let anthropic_app = anthropic::create_router_with_provider(
         &api_key,
-        Some(kiro_provider),
+        Some(kiro_provider.clone()),
         first_credentials.profile_arn.clone(),
-        config.compression.clone(),
+        config.read().compression.clone(),
     );
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
     // 安全检查：空字符串被视为未配置，防止空 key 绕过认证
     let admin_key_valid = config
+        .read()
         .admin_api_key
         .as_ref()
         .map(|k| !k.trim().is_empty())
         .unwrap_or(false);
 
-    let app = if let Some(admin_key) = &config.admin_api_key {
-        if admin_key.trim().is_empty() {
-            tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
-            anthropic_app
+    let app = {
+        let cfg = config.read();
+        if let Some(admin_key) = &cfg.admin_api_key {
+            if admin_key.trim().is_empty() {
+                tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
+                anthropic_app
+            } else {
+                let admin_service = admin::AdminService::new(
+                    token_manager.clone(),
+                    Some(kiro_provider.clone()),
+                    config.clone(),
+                );
+                let admin_state = admin::AdminState::new(admin_key, admin_service);
+                let admin_app = admin::create_admin_router(admin_state);
+
+                // 创建 Admin UI 路由
+                let admin_ui_app = admin_ui::create_admin_ui_router();
+
+                tracing::info!("Admin API 已启用");
+                tracing::info!("Admin UI 已启用: /admin");
+                anthropic_app
+                    .nest("/api/admin", admin_app)
+                    .nest("/admin", admin_ui_app)
+            }
         } else {
-            let admin_service = admin::AdminService::new(token_manager.clone());
-            let admin_state = admin::AdminState::new(admin_key, admin_service);
-            let admin_app = admin::create_admin_router(admin_state);
-
-            // 创建 Admin UI 路由
-            let admin_ui_app = admin_ui::create_admin_ui_router();
-
-            tracing::info!("Admin API 已启用");
-            tracing::info!("Admin UI 已启用: /admin");
             anthropic_app
-                .nest("/api/admin", admin_app)
-                .nest("/admin", admin_ui_app)
         }
-    } else {
-        anthropic_app
     };
 
     // 启动服务器
-    let addr = format!("{}:{}", config.host, config.port);
+    let addr = {
+        let cfg = config.read();
+        format!("{}:{}", cfg.host, cfg.port)
+    };
     tracing::info!("启动 Anthropic API 端点: {}", addr);
     #[cfg(feature = "sensitive-logs")]
     tracing::debug!("API Key: {}***", &api_key[..(api_key.len() / 2)]);

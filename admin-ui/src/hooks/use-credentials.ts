@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import {
   getCredentials,
   deleteCredential,
@@ -14,6 +15,8 @@ import {
   resetCredentialStats,
   resetAllStats,
   importTokenJson,
+  getProxyConfig,
+  updateProxyConfig,
 } from '@/api/credentials'
 import type { AddCredentialRequest, ImportTokenJsonRequest } from '@/types/api'
 
@@ -170,6 +173,29 @@ export function useImportTokenJson() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
       queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
+    },
+  })
+}
+
+// 查询全局代理配置
+export function useProxyConfig() {
+  return useQuery({
+    queryKey: ['proxyConfig'],
+    queryFn: getProxyConfig,
+  })
+}
+
+// 更新全局代理配置
+export function useUpdateProxyConfig() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: updateProxyConfig,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['proxyConfig'] })
+      toast.success('全局代理配置已更新')
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.error?.message || '更新失败')
     },
   })
 }

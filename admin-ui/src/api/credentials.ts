@@ -13,6 +13,8 @@ import type {
   CredentialAccountInfoResponse,
   ImportTokenJsonRequest,
   ImportTokenJsonResponse,
+  ProxyConfigResponse,
+  UpdateProxyConfigRequest,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -143,5 +145,17 @@ export async function importTokenJson(
     '/credentials/import-token-json',
     req
   )
+  return data
+}
+
+// 获取全局代理配置
+export async function getProxyConfig(): Promise<ProxyConfigResponse> {
+  const { data } = await api.get<ProxyConfigResponse>('/proxy')
+  return data
+}
+
+// 更新全局代理配置
+export async function updateProxyConfig(req: UpdateProxyConfigRequest): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>('/proxy', req)
   return data
 }

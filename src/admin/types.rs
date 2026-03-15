@@ -184,6 +184,25 @@ pub struct CachedBalancesResponse {
 
 // ============ 负载均衡配置 ============
 
+// ============ 全局代理配置 ============
+
+/// 全局代理配置响应
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyConfigResponse {
+    pub proxy_url: Option<String>,
+    pub has_credentials: bool,
+}
+
+/// 更新全局代理配置请求
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProxyConfigRequest {
+    pub proxy_url: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+}
+
 // ============ 通用响应 ============
 
 /// 操作成功响应

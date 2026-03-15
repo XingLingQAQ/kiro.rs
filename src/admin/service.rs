@@ -9,15 +9,19 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::common::utf8::floor_char_boundary;
+use crate::http_client::ProxyConfig;
 use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::provider::KiroProvider;
 use crate::kiro::token_manager::MultiTokenManager;
+use crate::model::config::Config;
+use parking_lot::RwLock;
 
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CachedBalanceItem,
     CachedBalancesResponse, CredentialStatusItem, CredentialsStatusResponse, ImportAction,
     ImportItemResult, ImportSummary, ImportTokenJsonRequest, ImportTokenJsonResponse,
-    TokenJsonItem,
+    ProxyConfigResponse, TokenJsonItem, UpdateProxyConfigRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -37,12 +41,18 @@ struct CachedBalance {
 /// 封装所有 Admin API 的业务逻辑
 pub struct AdminService {
     token_manager: Arc<MultiTokenManager>,
+    kiro_provider: Option<Arc<KiroProvider>>,
+    config: Arc<RwLock<Config>>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
 }
 
 impl AdminService {
-    pub fn new(token_manager: Arc<MultiTokenManager>) -> Self {
+    pub fn new(
+        token_manager: Arc<MultiTokenManager>,
+        kiro_provider: Option<Arc<KiroProvider>>,
+        config: Arc<RwLock<Config>>,
+    ) -> Self {
         let cache_path = token_manager
             .cache_dir()
             .map(|d| d.join("kiro_balance_cache.json"));
@@ -51,6 +61,8 @@ impl AdminService {
 
         Self {
             token_manager,
+            kiro_provider,
+            config,
             balance_cache: Mutex::new(balance_cache),
             cache_path,
         }
@@ -608,5 +620,69 @@ impl AdminService {
 
         // 默认 social
         "social".to_string()
+    }
+
+    /// 获取当前代理配置（脱敏）
+    pub fn get_proxy_config(&self) -> ProxyConfigResponse {
+        let config = self.config.read();
+        ProxyConfigResponse {
+            proxy_url: config.proxy_url.clone(),
+            has_credentials: config.proxy_username.is_some() && config.proxy_password.is_some(),
+        }
+    }
+
+    /// 更新代理配置（热更新）
+    pub async fn update_proxy_config(
+        &self,
+        req: UpdateProxyConfigRequest,
+    ) -> Result<(), AdminServiceError> {
+        // 1. 构建新的 ProxyConfig
+        let new_proxy = if let Some(url) = &req.proxy_url {
+            if url.trim().is_empty() {
+                None
+            } else {
+                let mut proxy = ProxyConfig::new(url.trim());
+                if let (Some(u), Some(p)) = (&req.proxy_username, &req.proxy_password)
+                    && !u.trim().is_empty() && !p.trim().is_empty() {
+                        proxy = proxy.with_auth(u.trim(), p.trim());
+                    }
+                // 如果未提供新认证信息，保留现有认证
+                if proxy.username.is_none() {
+                    let config = self.config.read();
+                    if let (Some(u), Some(p)) = (&config.proxy_username, &config.proxy_password) {
+                        proxy = proxy.with_auth(u, p);
+                    }
+                }
+                Some(proxy)
+            }
+        } else {
+            None
+        };
+
+        // 2. 先持久化配置（失败时不影响运行时状态）
+        {
+            let mut config = self.config.write();
+            config.proxy_url = new_proxy.as_ref().map(|p| p.url.clone());
+            config.proxy_username = new_proxy.as_ref().and_then(|p| p.username.clone());
+            config.proxy_password = new_proxy.as_ref().and_then(|p| p.password.clone());
+            config
+                .save()
+                .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        }
+
+        // 3. 持久化成功后再应用运行时变更
+        if let Some(provider) = &self.kiro_provider {
+            provider
+                .update_global_proxy(new_proxy.clone())
+                .map_err(|e| AdminServiceError::InternalError(format!("代理配置无效: {}", e)))?;
+        }
+
+        // 4. 热更新 MultiTokenManager
+        self.token_manager.update_proxy(new_proxy.clone());
+
+        // 5. 同步更新 count_tokens 通道的代理配置
+        crate::token::update_proxy(new_proxy);
+
+        Ok(())
     }
 }

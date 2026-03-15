@@ -8,8 +8,9 @@ use axum::{
 use super::{
     handlers::{
         add_credential, delete_credential, get_all_credentials, get_cached_balances,
-        get_credential_balance, import_token_json, reset_failure_count, set_credential_disabled,
-        set_credential_priority, set_credential_region,
+        get_credential_balance, get_proxy_config, import_token_json, reset_failure_count,
+        set_credential_disabled, set_credential_priority, set_credential_region,
+        update_proxy_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -45,6 +46,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/region", post(set_credential_region))
         .route("/credentials/{id}/reset", post(reset_failure_count))
         .route("/credentials/{id}/balance", get(get_credential_balance))
+        .route("/proxy", get(get_proxy_config).post(update_proxy_config))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

@@ -4,7 +4,7 @@
 //! 支持流式和非流式请求
 //! 支持多凭据故障转移和重试
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, CONNECTION, CONTENT_TYPE, HOST, HeaderMap, HeaderValue};
 use std::collections::{HashMap, HashSet};
@@ -33,9 +33,9 @@ const MAX_TOTAL_RETRIES: usize = 3;
 pub struct KiroProvider {
     token_manager: Arc<MultiTokenManager>,
     /// 默认 client（无代理或全局代理）
-    default_client: Client,
+    default_client: RwLock<Client>,
     /// 全局代理配置
-    global_proxy: Option<ProxyConfig>,
+    global_proxy: RwLock<Option<ProxyConfig>>,
     /// 凭据级代理 client 缓存（key: credential_id）
     client_cache: Mutex<HashMap<u64, Client>>,
 }
@@ -54,21 +54,37 @@ impl KiroProvider {
 
         Self {
             token_manager,
-            default_client,
-            global_proxy: proxy,
+            default_client: RwLock::new(default_client),
+            global_proxy: RwLock::new(proxy),
             client_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 热更新全局代理配置
+    ///
+    /// 重建 default_client 并清空 client_cache
+    pub fn update_global_proxy(&self, proxy: Option<ProxyConfig>) -> anyhow::Result<()> {
+        let new_client =
+            build_client(proxy.as_ref(), 720, self.token_manager.config().tls_backend)?;
+
+        *self.global_proxy.write() = proxy;
+        *self.default_client.write() = new_client;
+        self.client_cache.lock().clear();
+
+        tracing::info!("全局代理配置已热更新，client_cache 已清空");
+        Ok(())
     }
 
     /// 获取凭据对应的 HTTP Client
     ///
     /// 优先使用凭据级代理，否则使用默认 client
     fn get_client_for_credential(&self, ctx: &CallContext) -> Client {
-        let effective_proxy = ctx.credentials.effective_proxy(self.global_proxy.as_ref());
+        let global_proxy = self.global_proxy.read().clone();
+        let effective_proxy = ctx.credentials.effective_proxy(global_proxy.as_ref());
 
         // 如果凭据代理与全局代理相同，使用默认 client
-        if effective_proxy == self.global_proxy {
-            return self.default_client.clone();
+        if effective_proxy == global_proxy {
+            return self.default_client.read().clone();
         }
 
         // 检查缓存
@@ -87,7 +103,7 @@ impl KiroProvider {
         )
         .unwrap_or_else(|e| {
             tracing::warn!("创建凭据级代理 client 失败，使用默认 client: {}", e);
-            self.default_client.clone()
+            self.default_client.read().clone()
         });
 
         {

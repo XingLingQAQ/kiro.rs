@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, Trash2, RotateCcw, CheckCircle2 } from 'lucide-react'
+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, Trash2, RotateCcw, CheckCircle2, Globe } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -10,7 +10,8 @@ import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { ImportTokenJsonDialog } from '@/components/import-token-json-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
-import { useCredentials, useCachedBalances, useDeleteCredential, useResetFailure } from '@/hooks/use-credentials'
+import { ProxyConfigDialog } from '@/components/proxy-config-dialog'
+import { useCredentials, useCachedBalances, useDeleteCredential, useResetFailure, useProxyConfig } from '@/hooks/use-credentials'
 import { getCredentialBalance } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -28,6 +29,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [importDialogOpen, setImportDialogOpen] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false)
+  const [proxyConfigDialogOpen, setProxyConfigDialogOpen] = useState(false)
   const [verifying, setVerifying] = useState(false)
   const [verifyProgress, setVerifyProgress] = useState({ current: 0, total: 0 })
   const [verifyResults, setVerifyResults] = useState<Map<number, VerifyResult>>(new Map())
@@ -50,6 +52,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { data: cachedBalancesData } = useCachedBalances()
   const { mutate: deleteCredential } = useDeleteCredential()
   const { mutate: resetFailure } = useResetFailure()
+  const { data: proxyConfig } = useProxyConfig()
 
   // 构建 id -> cachedBalance 的映射
   const cachedBalanceMap = new Map(
@@ -506,7 +509,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       {/* 主内容 */}
       <main className="container mx-auto px-4 md:px-8 py-6">
         {/* 统计卡片 */}
-        <div className="grid gap-4 md:grid-cols-2 mb-6">
+        <div className="grid gap-4 md:grid-cols-3 mb-6">
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
@@ -525,6 +528,22 @@ export function Dashboard({ onLogout }: DashboardProps) {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold text-green-600">{data?.available || 0}</div>
+            </CardContent>
+          </Card>
+          <Card
+            className="cursor-pointer hover:border-primary/50 transition-colors"
+            onClick={() => setProxyConfigDialogOpen(true)}
+          >
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
+                <Globe className="h-4 w-4" />
+                全局代理
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-sm font-medium truncate">
+                {proxyConfig?.proxyUrl || '未配置'}
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -683,6 +702,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
       <ImportTokenJsonDialog
         open={importDialogOpen}
         onOpenChange={setImportDialogOpen}
+      />
+
+      {/* 全局代理配置对话框 */}
+      <ProxyConfigDialog
+        open={proxyConfigDialogOpen}
+        onOpenChange={setProxyConfigDialogOpen}
       />
 
 

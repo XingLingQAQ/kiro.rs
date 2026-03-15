@@ -12,6 +12,7 @@ use crate::anthropic::types::{
 };
 use crate::http_client::{ProxyConfig, build_client};
 use crate::model::config::TlsBackend;
+use parking_lot::RwLock;
 use std::sync::OnceLock;
 
 /// Count Tokens API 配置
@@ -32,11 +33,31 @@ pub struct CountTokensConfig {
 /// 全局配置存储
 static COUNT_TOKENS_CONFIG: OnceLock<CountTokensConfig> = OnceLock::new();
 
+/// 代理配置的运行时可变存储（热更新时同步刷新）
+static COUNT_TOKENS_PROXY: OnceLock<RwLock<Option<ProxyConfig>>> = OnceLock::new();
+
 /// 初始化 count_tokens 配置
 ///
 /// 应在应用启动时调用一次
 pub fn init_config(config: CountTokensConfig) {
+    let proxy = config.proxy.clone();
     let _ = COUNT_TOKENS_CONFIG.set(config);
+    let _ = COUNT_TOKENS_PROXY.set(RwLock::new(proxy));
+}
+
+/// 热更新代理配置
+pub fn update_proxy(proxy: Option<ProxyConfig>) {
+    if let Some(lock) = COUNT_TOKENS_PROXY.get() {
+        *lock.write() = proxy;
+    }
+}
+
+/// 获取当前代理配置
+fn get_current_proxy() -> Option<ProxyConfig> {
+    COUNT_TOKENS_PROXY
+        .get()
+        .map(|lock| lock.read().clone())
+        .unwrap_or(None)
 }
 
 /// 获取配置
@@ -143,7 +164,8 @@ async fn call_remote_count_tokens(
     tools: &Option<Vec<Tool>>,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     let api_url = config.api_url.as_ref().unwrap();
-    let client = build_client(config.proxy.as_ref(), 300, config.tls_backend)?;
+    let current_proxy = get_current_proxy();
+    let client = build_client(current_proxy.as_ref(), 300, config.tls_backend)?;
 
     // 构建请求体
     let request = CountTokensRequest {

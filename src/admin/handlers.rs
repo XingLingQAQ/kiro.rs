@@ -10,7 +10,7 @@ use super::{
     middleware::AdminState,
     types::{
         AddCredentialRequest, ImportTokenJsonRequest, SetDisabledRequest, SetPriorityRequest,
-        SetRegionRequest, SuccessResponse,
+        SetRegionRequest, SuccessResponse, UpdateProxyConfigRequest,
     },
 };
 
@@ -136,4 +136,20 @@ pub async fn import_token_json(
 ) -> impl IntoResponse {
     let response = state.service.import_token_json(payload).await;
     Json(response)
+}
+
+/// GET /proxy - 获取全局代理配置
+pub async fn get_proxy_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_proxy_config())
+}
+
+/// POST /proxy - 更新全局代理配置
+pub async fn update_proxy_config(
+    State(state): State<AdminState>,
+    Json(req): Json<UpdateProxyConfigRequest>,
+) -> impl IntoResponse {
+    match state.service.update_proxy_config(req).await {
+        Ok(_) => Json(SuccessResponse::new("全局代理配置已更新")).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
 }

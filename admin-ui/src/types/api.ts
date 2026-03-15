@@ -309,3 +309,16 @@ export interface ImportTokenJsonResponse {
   summary: ImportSummary
   items: ImportItemResult[]
 }
+
+// ============ 全局代理配置 ============
+
+export interface ProxyConfigResponse {
+  proxyUrl: string | null
+  hasCredentials: boolean
+}
+
+export interface UpdateProxyConfigRequest {
+  proxyUrl?: string | null
+  proxyUsername?: string | null
+  proxyPassword?: string | null
+}
