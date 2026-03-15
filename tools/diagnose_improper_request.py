@@ -342,6 +342,45 @@ def find_issues(
     elif json_len > large_payload_bytes:
         issues.append("W_PAYLOAD_LARGE")
 
+    # 图片数量检查（所有消息合计）
+    all_images = list(images) if isinstance(images, list) else []
+    for h in history if isinstance(history, list) else []:
+        um = h.get("userInputMessage") if isinstance(h, dict) else None
+        if isinstance(um, dict):
+            hist_images = um.get("images") or []
+            all_images.extend(hist_images if isinstance(hist_images, list) else [])
+    if len(all_images) > 20:
+        issues.append(f"E_IMAGE_COUNT_EXCEEDS_LIMIT({len(all_images)})")
+
+    # 工具名称重复检查（大小写不敏感）
+    if isinstance(tools, list) and len(tools) > 0:
+        tool_names_lower = [
+            t.get("toolSpecification", {}).get("name", "").lower()
+            for t in tools
+            if isinstance(t, dict)
+        ]
+        from collections import Counter as _Counter
+
+        _name_counts = _Counter(tool_names_lower)
+        _duplicates = {k: v for k, v in _name_counts.items() if v > 1}
+        if _duplicates:
+            issues.append(f"W_TOOL_NAME_DUPLICATE({_duplicates})")
+
+    # 历史消息 role 交替检查
+    if isinstance(history, list) and len(history) > 1:
+        roles = []
+        for h in history:
+            if not isinstance(h, dict):
+                continue
+            if "assistantResponseMessage" in h:
+                roles.append("assistant")
+            elif "userInputMessage" in h:
+                roles.append("user")
+        for i in range(1, len(roles)):
+            if roles[i] == roles[i - 1]:
+                issues.append(f"W_HISTORY_ROLE_NOT_ALTERNATING(pos={i},role={roles[i]})")
+                break
+
     return issues
 
 

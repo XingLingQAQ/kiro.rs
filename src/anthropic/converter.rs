@@ -17,6 +17,9 @@ use super::types::{ContentBlock, MessagesRequest, Tool as AnthropicTool};
 use crate::anthropic::compressor::CompressionStats;
 use crate::model::config::CompressionConfig;
 
+/// 单请求图片总数上限（所有消息合计，含 GIF 抽帧后的帧数）
+const MAX_TOTAL_IMAGES: usize = 20;
+
 /// 规范化 JSON Schema，修复 MCP 工具定义中常见的类型问题
 ///
 /// Claude Code / MCP 工具定义偶尔会出现 `required: null`、`properties: null` 等，
@@ -340,15 +343,24 @@ pub fn convert_request(
         .map(|msg| count_images_in_content(&msg.content))
         .sum();
 
+    // 4.6. 初始化图片配额（所有消息合计不超过 MAX_TOTAL_IMAGES）
+    let mut remaining_image_budget = MAX_TOTAL_IMAGES;
+
     // 5. 处理最后一条消息作为 current_message（经过 prefill 预处理，末尾必为 user）
+    // 先处理 currentMessage 以优先保留当前用户输入的图片
     let last_message = messages.last().unwrap();
-    let (text_content, images, tool_results) =
-        process_message_content(&last_message.content, compression_config, total_image_count)?;
+    let (text_content, images, tool_results) = process_message_content(
+        &last_message.content,
+        compression_config,
+        total_image_count,
+        &mut remaining_image_budget,
+    )?;
 
     // 6. 转换工具定义
     let mut tools = convert_tools(&req.tools, compression_config.tool_description_max_chars);
 
     // 7. 构建历史消息（需要先构建，以便收集历史中使用的工具）
+    // history 使用 currentMessage 消耗后的剩余图片配额
     let mut history = build_history(
         req,
         messages,
@@ -356,6 +368,7 @@ pub fn convert_request(
         compression_config,
         total_image_count,
         is_agentic_model(&req.model),
+        &mut remaining_image_budget,
     )?;
 
     // 8. 验证并过滤 tool_use/tool_result 配对
@@ -387,6 +400,39 @@ pub fn convert_request(
     // 10.5. 工具压缩：在所有工具（含 placeholder）就绪后执行
     tools = super::tool_compression::compress_tools_if_needed(&tools);
 
+    // 10.6. 工具统计诊断日志
+    {
+        let original_tool_count = req.tools.as_ref().map(|t| t.len()).unwrap_or(0);
+        let placeholder_count = tools.len().saturating_sub(original_tool_count);
+
+        // 大小写不敏感的重复检测
+        let mut name_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for t in &tools {
+            *name_counts
+                .entry(t.tool_specification.name.to_lowercase())
+                .or_insert(0) += 1;
+        }
+        let duplicates: Vec<_> = name_counts
+            .iter()
+            .filter(|(_, count)| **count > 1)
+            .map(|(name, count)| format!("{}(x{})", name, count))
+            .collect();
+
+        if !duplicates.is_empty() {
+            tracing::warn!(
+                tool_count = tools.len(),
+                duplicates = ?duplicates,
+                "检测到重复工具名称（大小写不敏感）"
+            );
+        }
+        tracing::info!(
+            tool_count = tools.len(),
+            placeholder_count = placeholder_count,
+            "工具定义统计"
+        );
+    }
+
     // 11. 构建 UserInputMessageContext
     let mut context = UserInputMessageContext::new();
     if !tools.is_empty() {
@@ -417,6 +463,20 @@ pub fn convert_request(
     }
 
     let current_message = CurrentMessage::new(user_input);
+
+    // 12.5. 图片统计日志
+    {
+        let actual_image_count = MAX_TOTAL_IMAGES - remaining_image_budget;
+        if actual_image_count > 0 || total_image_count > 0 {
+            tracing::info!(
+                source_image_count = total_image_count,
+                actual_image_count = actual_image_count,
+                images_dropped = total_image_count.saturating_sub(actual_image_count),
+                budget_remaining = remaining_image_budget,
+                "图片统计"
+            );
+        }
+    }
 
     // 13. 构建 ConversationState
     let mut conversation_state = ConversationState::new(conversation_id)
@@ -455,6 +515,7 @@ fn process_message_content(
     content: &serde_json::Value,
     compression_config: &CompressionConfig,
     total_image_count: usize,
+    remaining_image_budget: &mut usize,
 ) -> Result<(String, Vec<KiroImage>, Vec<ToolResult>), ConversionError> {
     let mut text_parts = Vec::new();
     let mut images = Vec::new();
@@ -479,10 +540,15 @@ fn process_message_content(
                             {
                                 // GIF：抽帧为多张静态图，避免动图 base64 体积巨大导致上游 400
                                 if format.eq_ignore_ascii_case("gif") {
+                                    if *remaining_image_budget == 0 {
+                                        tracing::warn!("图片配额已用尽，跳过 GIF");
+                                        continue;
+                                    }
                                     match process_gif_frames(
                                         &source.data,
                                         compression_config,
                                         total_image_count,
+                                        *remaining_image_budget,
                                     ) {
                                         Ok(gif) => {
                                             let total_final_bytes: usize =
@@ -499,18 +565,25 @@ fn process_message_content(
                                                 "GIF 已抽帧并重编码"
                                             );
 
+                                            let frame_count = gif.frames.len();
                                             for f in gif.frames {
                                                 images.push(KiroImage::from_base64(
                                                     gif.output_format,
                                                     f.data,
                                                 ));
                                             }
+                                            *remaining_image_budget =
+                                                remaining_image_budget.saturating_sub(frame_count);
                                         }
                                         Err(e) => {
                                             tracing::warn!(
                                                 "GIF 抽帧失败，回退为静态图（可能丢失动图信息）: {}",
                                                 e
                                             );
+                                            if *remaining_image_budget == 0 {
+                                                tracing::warn!("图片配额已用尽，跳过 GIF 回退");
+                                                continue;
+                                            }
                                             match process_image_to_format(
                                                 &source.data,
                                                 "jpeg",
@@ -522,6 +595,7 @@ fn process_message_content(
                                                         "jpeg",
                                                         result.data,
                                                     ));
+                                                    *remaining_image_budget -= 1;
                                                 }
                                                 Err(e2) => {
                                                     tracing::warn!(
@@ -539,6 +613,7 @@ fn process_message_content(
                                                                 format,
                                                                 result.data,
                                                             ));
+                                                            *remaining_image_budget -= 1;
                                                         }
                                                         Err(e3) => {
                                                             tracing::warn!(
@@ -549,6 +624,7 @@ fn process_message_content(
                                                                 format,
                                                                 source.data,
                                                             ));
+                                                            *remaining_image_budget -= 1;
                                                         }
                                                     }
                                                 }
@@ -557,6 +633,10 @@ fn process_message_content(
                                     }
                                 } else {
                                     // 处理静态图片（可能缩放）
+                                    if *remaining_image_budget == 0 {
+                                        tracing::warn!("图片配额已用尽，跳过静态图片");
+                                        continue;
+                                    }
                                     match process_image(
                                         &source.data,
                                         &format,
@@ -574,11 +654,13 @@ fn process_message_content(
                                             }
                                             images
                                                 .push(KiroImage::from_base64(format, result.data));
+                                            *remaining_image_budget -= 1;
                                         }
                                         Err(e) => {
                                             tracing::warn!("图片处理失败，使用原始数据: {}", e);
                                             images
                                                 .push(KiroImage::from_base64(format, source.data));
+                                            *remaining_image_budget -= 1;
                                         }
                                     }
                                 }
@@ -721,6 +803,19 @@ fn validate_tool_pairing(
         tracing::warn!(
             "检测到孤立的 tool_use：找不到对应的 tool_result，将从历史中移除，tool_use_id={}",
             orphaned_id
+        );
+    }
+
+    // 配对验证汇总日志（仅在有异常时输出）
+    if !unpaired_tool_use_ids.is_empty() || filtered_results.len() != tool_results.len() {
+        tracing::warn!(
+            total_tool_use_ids = all_tool_use_ids.len(),
+            history_tool_result_ids = history_tool_result_ids.len(),
+            orphaned_tool_use_count = unpaired_tool_use_ids.len(),
+            orphaned_tool_use_ids = ?unpaired_tool_use_ids,
+            input_tool_results = tool_results.len(),
+            output_tool_results = filtered_results.len(),
+            "tool_use/tool_result 配对验证完成（有异常）"
         );
     }
 
@@ -900,6 +995,7 @@ fn build_history(
     compression_config: &CompressionConfig,
     total_image_count: usize,
     is_agentic: bool,
+    remaining_image_budget: &mut usize,
 ) -> Result<Vec<Message>, ConversionError> {
     let mut history = Vec::new();
 
@@ -996,6 +1092,7 @@ fn build_history(
                     model_id,
                     compression_config,
                     total_image_count,
+                    remaining_image_budget,
                 )?;
                 history.push(Message::User(merged_user));
                 user_buffer.clear();
@@ -1018,6 +1115,7 @@ fn build_history(
             model_id,
             compression_config,
             total_image_count,
+            remaining_image_budget,
         )?;
         history.push(Message::User(merged_user));
 
@@ -1026,23 +1124,63 @@ fn build_history(
         history.push(Message::Assistant(auto_assistant));
     }
 
+    // 历史结构摘要日志
+    {
+        let mut user_count = 0usize;
+        let mut assistant_count = 0usize;
+        let mut synthetic_count = 0usize;
+        let mut image_count_in_history = 0usize;
+
+        // system 消息产生的合成配对
+        if req
+            .system
+            .as_ref()
+            .is_some_and(|s| s.iter().any(|b| !b.text.is_empty()))
+        {
+            synthetic_count += 2;
+        }
+
+        for msg in &history {
+            match msg {
+                Message::User(u) => {
+                    user_count += 1;
+                    image_count_in_history += u.user_input_message.images.len();
+                }
+                Message::Assistant(_) => assistant_count += 1,
+            }
+        }
+
+        tracing::info!(
+            history_len = history.len(),
+            user_messages = user_count,
+            assistant_messages = assistant_count,
+            synthetic_pairs = synthetic_count,
+            images_in_history = image_count_in_history,
+            "历史消息结构摘要"
+        );
+    }
+
     Ok(history)
 }
 
-/// 合并多个 user 消息
 fn merge_user_messages(
     messages: &[&super::types::Message],
     model_id: &str,
     compression_config: &CompressionConfig,
     total_image_count: usize,
+    remaining_image_budget: &mut usize,
 ) -> Result<HistoryUserMessage, ConversionError> {
     let mut content_parts = Vec::new();
     let mut all_images = Vec::new();
     let mut all_tool_results = Vec::new();
 
     for msg in messages {
-        let (text, images, tool_results) =
-            process_message_content(&msg.content, compression_config, total_image_count)?;
+        let (text, images, tool_results) = process_message_content(
+            &msg.content,
+            compression_config,
+            total_image_count,
+            remaining_image_budget,
+        )?;
         if !text.is_empty() {
             content_parts.push(text);
         }
@@ -1054,6 +1192,13 @@ fn merge_user_messages(
         content_parts.join("\n"),
         !all_images.is_empty() || !all_tool_results.is_empty(),
     );
+    // 图片被 budget 裁剪后可能导致 content 为空（原消息仅含图片无文本），
+    // 上游会拒绝空 content（400 Improperly formed request），此处做最终兜底。
+    let content = if content.trim().is_empty() {
+        ".".to_string()
+    } else {
+        content
+    };
     // 保留文本内容，即使有工具结果也不丢弃用户文本
     let mut user_msg = UserMessage::new(&content, model_id);
 

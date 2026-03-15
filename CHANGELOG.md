@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Admin UI 全局代理配置热更新** — 新增 `GET/POST /api/admin/proxy` 端点，支持在 Admin UI 中查看和修改全局代理配置（proxyUrl/proxyUsername/proxyPassword），修改后运行时立即生效无需重启；`KiroProvider.global_proxy`/`default_client` 和 `MultiTokenManager.proxy` 改为 `RwLock` 实现内部可变性，更新时自动重建 HTTP Client 并清空凭据级 Client 缓存；配置变更同步持久化到 `config.json`；前端新增代理配置对话框和 Dashboard 入口卡片 (`src/kiro/provider.rs`, `src/kiro/token_manager.rs`, `src/admin/service.rs`, `src/admin/handlers.rs`, `src/admin/router.rs`, `src/main.rs`, `admin-ui/src/components/proxy-config-dialog.tsx`, `admin-ui/src/components/dashboard.tsx`)
+- **图片全局 Cap 20 张** — 所有图片（静态图 + GIF 抽帧 + history 图片）合计不超过 20 张，通过 `remaining_image_budget` 在 `process_message_content` / `merge_user_messages` / `build_history` 调用链中传递配额；currentMessage 优先消耗配额，history 使用剩余配额；GIF 抽帧时动态传递剩余 budget 限制最大帧数 (`src/anthropic/converter.rs`, `src/image.rs`)
+- **上游 400 诊断日志增强** — 工具统计日志（重复检测、placeholder 计数）、`validate_tool_pairing` 异常汇总日志、`build_history` 历史结构摘要日志、图片统计日志；`is_improperly_formed_request_error` 分支增加 `kiro_request_body_bytes` 字段 (`src/anthropic/converter.rs`, `src/anthropic/handlers.rs`)
+- **诊断工具增强** — `diagnose_improper_request.py` 新增图片数量超限 (`E_IMAGE_COUNT_EXCEEDS_LIMIT`)、工具名称重复 (`W_TOOL_NAME_DUPLICATE`)、history role 交替 (`W_HISTORY_ROLE_NOT_ALTERNATING`) 三项检查 (`tools/diagnose_improper_request.py`)
+
 ## [v1.1.7] - 2026-03-14
 
 ### Fixed

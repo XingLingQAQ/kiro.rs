@@ -618,11 +618,11 @@ fn repair_tool_result_text_fields(
     let mut repaired = 0usize;
     for result in results.iter_mut() {
         for map in result.content.iter_mut() {
-            if let Some(serde_json::Value::String(text)) = map.get_mut("text") {
-                if text.trim().is_empty() {
-                    *text = ".".to_string();
-                    repaired += 1;
-                }
+            if let Some(serde_json::Value::String(text)) = map.get_mut("text")
+                && text.trim().is_empty()
+            {
+                *text = ".".to_string();
+                repaired += 1;
             }
         }
     }

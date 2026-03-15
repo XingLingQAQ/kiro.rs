@@ -331,6 +331,7 @@ fn map_kiro_provider_error_to_response(request_body: &str, err: Error) -> Respon
     if is_improperly_formed_request_error(&err) {
         tracing::warn!(
             error = %err,
+            kiro_request_body_bytes = request_body.len(),
             "上游拒绝请求：请求格式错误（可能是空消息内容或其他格式问题）"
         );
         return (

@@ -51,7 +51,7 @@ pub struct ImageProcessResult {
     /// 是否进行了重新编码（即使无需缩放）
     ///
     /// 主要用于 GIF：即便尺寸已符合限制，也会重新编码为静态帧，
-    /// 避免把“体积巨大但分辨率很小的动图”原样发送到上游导致请求体过大。
+    /// 避免把"体积巨大但分辨率很小的动图"原样发送到上游导致请求体过大。
     pub was_reencoded: bool,
     /// 原始图片字节数（base64 解码后）
     pub original_bytes_len: usize,
@@ -59,16 +59,17 @@ pub struct ImageProcessResult {
     pub final_bytes_len: usize,
 }
 
-/// 将 GIF 抽帧并重编码为多张静态图（用于降低请求体、提升“动图内容”识别效果）
+/// 将 GIF 抽帧并重编码为多张静态图（用于降低请求体、提升"动图内容"识别效果）
 ///
 /// 采样策略（符合你给的约束）：
 /// - 总帧数不超过 `GIF_MAX_OUTPUT_FRAMES`
 /// - 采样频率不超过 `GIF_MAX_FPS`（每秒最多 5 张）
-/// - 当 GIF 过长导致超出总帧数时，按“秒级上限”下调采样频率（例如 8 秒 GIF → 每秒最多 2 张）
+/// - 当 GIF 过长导致超出总帧数时，按"秒级上限"下调采样频率（例如 8 秒 GIF → 每秒最多 2 张）
 pub fn process_gif_frames(
     base64_data: &str,
     config: &CompressionConfig,
     image_count: usize,
+    max_frames_budget: usize,
 ) -> Result<GifSamplingResult, String> {
     let gif_bytes = BASE64
         .decode(base64_data)
@@ -94,16 +95,20 @@ pub fn process_gif_frames(
     };
 
     // 计算采样间隔：
-    // - 优先按“每秒最多 N 张（N<=5）”控制（用户期望的直觉规则）
+    // - 优先按"每秒最多 N 张（N<=5）"控制（用户期望的直觉规则）
     // - 当 GIF 超长（duration_secs > max_frames）时，转为按 max_frames 均匀采样
+    let effective_max_frames = max_frames_budget.min(GIF_MAX_OUTPUT_FRAMES);
+    if effective_max_frames == 0 {
+        return Err("图片配额已用尽".to_string());
+    }
     let duration_secs_ceil = duration_ms.div_ceil(1000).max(1) as usize;
-    let fps_by_total = GIF_MAX_OUTPUT_FRAMES / duration_secs_ceil; // integer fps-per-second cap
+    let fps_by_total = effective_max_frames / duration_secs_ceil; // integer fps-per-second cap
     let fps = fps_by_total.min(GIF_MAX_FPS);
     let sampling_interval_ms = if fps > 0 {
         (1000 / fps as u64).max(1000 / GIF_MAX_FPS as u64)
     } else {
-        // duration_secs_ceil > GIF_MAX_OUTPUT_FRAMES：平均 < 1 fps，改为均匀抽取 max_frames 张
-        duration_ms.div_ceil(GIF_MAX_OUTPUT_FRAMES as u64).max(1)
+        // duration_secs_ceil > effective_max_frames：平均 < 1 fps，改为均匀抽取 max_frames 张
+        duration_ms.div_ceil(effective_max_frames as u64).max(1)
     };
 
     // 根据图片数量选择像素限制（复用现有策略）
@@ -122,7 +127,7 @@ pub fn process_gif_frames(
     let mut next_sample_ms = 0u64;
 
     for frame in decoder.into_frames() {
-        if frames_out.len() >= GIF_MAX_OUTPUT_FRAMES {
+        if frames_out.len() >= effective_max_frames {
             break;
         }
 
@@ -457,7 +462,7 @@ mod tests {
         use image::codecs::gif::{GifEncoder, Repeat};
         use image::{Delay, Frame, Rgba, RgbaImage};
 
-        // 构造一个多帧 GIF（像素小但包含多帧），用于验证“强制重编码为静态帧”的行为。
+        // 构造一个多帧 GIF（像素小但包含多帧），用于验证"强制重编码为静态帧"的行为。
         let mut frames = Vec::new();
         for i in 0..10u8 {
             let mut img = RgbaImage::new(32, 32);
@@ -514,7 +519,7 @@ mod tests {
 
         let base64_data = BASE64.encode(&buf);
         let config = CompressionConfig::default();
-        let res = process_gif_frames(&base64_data, &config, 1).unwrap();
+        let res = process_gif_frames(&base64_data, &config, 1, GIF_MAX_OUTPUT_FRAMES).unwrap();
 
         assert_eq!(res.duration_ms, 8000);
         assert_eq!(res.sampling_interval_ms, 500);
@@ -548,7 +553,7 @@ mod tests {
 
         let base64_data = BASE64.encode(&buf);
         let config = CompressionConfig::default();
-        let res = process_gif_frames(&base64_data, &config, 1).unwrap();
+        let res = process_gif_frames(&base64_data, &config, 1, GIF_MAX_OUTPUT_FRAMES).unwrap();
 
         assert_eq!(res.duration_ms, 4000);
         assert_eq!(res.sampling_interval_ms, 200);
