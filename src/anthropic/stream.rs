@@ -484,7 +484,7 @@ pub struct StreamContext {
     pub thinking_extracted: bool,
     /// thinking 块索引
     pub thinking_block_index: Option<i32>,
-    /// 文本块索引（thinking 启用时动态分配）
+    /// 文本块索引（按需动态分配）
     pub text_block_index: Option<i32>,
     /// 是否需要剥离 thinking 内容开头的换行符
     /// 模型输出 `<thinking>\n` 时，`\n` 可能与标签在同一 chunk 或下一 chunk
@@ -536,10 +536,11 @@ impl StreamContext {
         })
     }
 
-    /// 生成初始事件序列 (message_start + 文本块 start)
+    /// 生成初始事件序列（仅 message_start）
     ///
-    /// 当 thinking 启用时，不在初始化时创建文本块，而是等到实际收到内容时再创建。
-    /// 这样可以确保 thinking 块（索引 0）在文本块（索引 1）之前。
+    /// 注意：不再在初始化阶段创建空 text block。
+    /// 否则当模型首个输出为 tool_use（且没有任何 text_delta）时，
+    /// 会产生一个空的 text content block（text=""），客户端写回 history 后会触发上游校验拒绝。
     pub fn generate_initial_events(&mut self) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
@@ -548,29 +549,6 @@ impl StreamContext {
         if let Some(event) = self.state_manager.handle_message_start(msg_start) {
             events.push(event);
         }
-
-        // 如果启用了 thinking，不在这里创建文本块
-        // thinking 块和文本块会在 process_content_with_thinking 中按正确顺序创建
-        if self.thinking_enabled {
-            return events;
-        }
-
-        // 创建初始文本块（仅在未启用 thinking 时）
-        let text_block_index = self.state_manager.next_block_index();
-        self.text_block_index = Some(text_block_index);
-        let text_block_events = self.state_manager.handle_content_block_start(
-            text_block_index,
-            "text",
-            json!({
-                "type": "content_block_start",
-                "index": text_block_index,
-                "content_block": {
-                    "type": "text",
-                    "text": ""
-                }
-            }),
-        );
-        events.extend(text_block_events);
 
         events
     }
@@ -1259,13 +1237,23 @@ mod tests {
         assert!(
             initial_events
                 .iter()
-                .any(|e| e.event == "content_block_start"
-                    && e.data["content_block"]["type"] == "text")
+                .all(|e| !(e.event == "content_block_start"
+                    && e.data["content_block"]["type"] == "text"))
         );
 
-        let initial_text_index = ctx
-            .text_block_index
-            .expect("initial text block index should exist");
+        // 首次输出文本时应创建 text block
+        let first_text_events = ctx.process_assistant_response("hi");
+        let initial_text_index = first_text_events
+            .iter()
+            .find_map(|e| {
+                if e.event == "content_block_start" && e.data["content_block"]["type"] == "text" {
+                    e.data["index"].as_i64()
+                } else {
+                    None
+                }
+            })
+            .expect("text block should start on first text delta")
+            as i32;
 
         // tool_use 开始会自动关闭现有 text block
         let tool_events = ctx.process_tool_use(&crate::kiro::model::events::ToolUseEvent {
@@ -1307,6 +1295,37 @@ mod tests {
                     && e.data["delta"]["text"] == "hello"
             }),
             "should emit text_delta after restarting text block"
+        );
+    }
+
+    #[test]
+    fn test_tool_use_only_does_not_emit_empty_text_block() {
+        // tool_use-only 的流式响应不应产生空 text block（text=""），否则客户端写回 history 会触发上游校验拒绝
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false);
+
+        let mut all_events = Vec::new();
+        all_events.extend(ctx.generate_initial_events());
+        all_events.extend(
+            ctx.process_tool_use(&crate::kiro::model::events::ToolUseEvent {
+                name: "test_tool".to_string(),
+                tool_use_id: "tool_1".to_string(),
+                input: "{}".to_string(),
+                stop: true,
+            }),
+        );
+        all_events.extend(ctx.generate_final_events());
+
+        assert!(
+            all_events.iter().any(|e| {
+                e.event == "content_block_start" && e.data["content_block"]["type"] == "tool_use"
+            }),
+            "should emit tool_use content_block_start"
+        );
+        assert!(
+            all_events.iter().all(|e| {
+                !(e.event == "content_block_start" && e.data["content_block"]["type"] == "text")
+            }),
+            "tool_use-only stream should not start a text block"
         );
     }
 

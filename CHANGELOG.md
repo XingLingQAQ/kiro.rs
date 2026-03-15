@@ -6,6 +6,9 @@
 - **Admin UI 凭据列表排序** — 支持按 ID 或余额对凭据列表进行排序
 - **全局配置热更新（region / credentialRpm / compression）** — 支持在 Admin UI 中实时修改全局 Region、单凭据目标 RPM 和输入压缩配置，无需重启服务
 
+### Fixed
+- **SSE 初始化不再预创建空 text block** — `generate_initial_events` 仅发送 `message_start`，不再预创建 `text=""` 的空文本块；当模型首个输出为 tool_use 且无任何 text_delta 时，避免产生空 text content block 被客户端写回 history 后触发上游 400 校验拒绝；新增 `strip_empty_text_content_blocks` 防御性函数和 `test_tool_use_only_does_not_emit_empty_text_block` 回归测试 (`src/anthropic/stream.rs`, `src/anthropic/handlers.rs`)
+
 ## [v1.1.8] - 2026-03-15
 
 ### Added

@@ -420,6 +420,43 @@ fn mask_user_id(user_id: Option<&str>) -> String {
     }
 }
 
+/// 剔除 messages 中的空 text content block（`{"type":"text","text":""}` 或纯空白）。
+///
+/// 说明：
+/// - Claude Code/claude-cli 在某些 tool_use-only 场景下可能会把空 text block 写回 history；
+/// - 上游会拒绝空 text block（400: "text content blocks must be non-empty"）。
+/// - 空 text block 不携带任何语义，直接移除是最小且安全的兼容策略。
+fn strip_empty_text_content_blocks(messages: &mut [super::types::Message]) -> usize {
+    let mut removed = 0usize;
+
+    for msg in messages {
+        let serde_json::Value::Array(arr) = &mut msg.content else {
+            continue;
+        };
+
+        let before = arr.len();
+        arr.retain(|item| {
+            let Some(obj) = item.as_object() else {
+                return true;
+            };
+
+            if obj.get("type").and_then(|v| v.as_str()) != Some("text") {
+                return true;
+            }
+
+            match obj.get("text") {
+                Some(serde_json::Value::String(s)) => !s.trim().is_empty(),
+                Some(serde_json::Value::Null) | None => false,
+                // text 字段类型异常：保守起见不删，交由后续转换/上游校验处理
+                _ => true,
+            }
+        });
+        removed += before - arr.len();
+    }
+
+    removed
+}
+
 /// GET /v1/models
 ///
 /// 返回可用的模型列表
@@ -675,6 +712,12 @@ pub async fn post_messages(
     if websearch::has_web_search_tool(&payload) {
         tracing::info!("检测到混合工具列表中的 web_search，剔除后转发上游");
         websearch::strip_web_search_tools(&mut payload);
+    }
+
+    // 剔除空 text content block（客户端可能将 tool_use-only 响应中的空 text block 写回 history）
+    let stripped = strip_empty_text_content_blocks(&mut payload.messages);
+    if stripped > 0 {
+        tracing::info!(stripped, "已剔除空 text content block");
     }
 
     // 转换请求
@@ -1334,6 +1377,12 @@ pub async fn post_messages_cc(
     if websearch::has_web_search_tool(&payload) {
         tracing::info!("检测到混合工具列表中的 web_search，剔除后转发上游");
         websearch::strip_web_search_tools(&mut payload);
+    }
+
+    // 剔除空 text content block（客户端可能将 tool_use-only 响应中的空 text block 写回 history）
+    let stripped = strip_empty_text_content_blocks(&mut payload.messages);
+    if stripped > 0 {
+        tracing::info!(stripped, "已剔除空 text content block");
     }
 
     // 转换请求

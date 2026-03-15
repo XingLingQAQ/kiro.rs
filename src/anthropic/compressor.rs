@@ -613,7 +613,7 @@ fn repair_non_empty_content_pass(state: &mut ConversationState) -> usize {
 
 /// 修复 tool_result content 数组中 text 字段为空字符串的条目，替换为 "."。
 fn repair_tool_result_text_fields(
-    results: &mut Vec<crate::kiro::model::requests::tool::ToolResult>,
+    results: &mut [crate::kiro::model::requests::tool::ToolResult],
 ) -> usize {
     let mut repaired = 0usize;
     for result in results.iter_mut() {
