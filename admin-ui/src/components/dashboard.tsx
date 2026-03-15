@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, Trash2, RotateCcw, CheckCircle2, Globe } from 'lucide-react'
+import { useState, useEffect, useRef, useMemo } from 'react'
+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, Trash2, RotateCcw, CheckCircle2, Globe, ArrowUp, ArrowDown } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -16,6 +16,9 @@ import { getCredentialBalance } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import type { BalanceResponse } from '@/types/api'
+
+type SortField = 'default' | 'id' | 'balance'
+type SortOrder = 'asc' | 'desc'
 
 interface DashboardProps {
   onLogout: () => void
@@ -39,6 +42,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
   const cancelVerifyRef = useRef(false)
   const [currentPage, setCurrentPage] = useState(1)
+  const [sortField, setSortField] = useState<SortField>('default')
+  const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
   const itemsPerPage = 12
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -59,11 +64,29 @@ export function Dashboard({ onLogout }: DashboardProps) {
     cachedBalancesData?.balances.map((b) => [b.id, b]) ?? []
   )
 
+  // 排序后的凭据列表
+  const sortedCredentials = useMemo(() => {
+    const credentials = data?.credentials || []
+    if (sortField === 'default') return credentials
+
+    return [...credentials].sort((a, b) => {
+      let cmp = 0
+      if (sortField === 'id') {
+        cmp = a.id - b.id
+      } else if (sortField === 'balance') {
+        const balA = cachedBalanceMap.get(a.id)?.remaining ?? -Infinity
+        const balB = cachedBalanceMap.get(b.id)?.remaining ?? -Infinity
+        cmp = balA - balB
+      }
+      return sortOrder === 'asc' ? cmp : -cmp
+    })
+  }, [data?.credentials, sortField, sortOrder, cachedBalanceMap])
+
   // 计算分页
-  const totalPages = Math.ceil((data?.credentials.length || 0) / itemsPerPage)
+  const totalPages = Math.ceil(sortedCredentials.length / itemsPerPage)
   const startIndex = (currentPage - 1) * itemsPerPage
   const endIndex = startIndex + itemsPerPage
-  const currentCredentials = data?.credentials.slice(startIndex, endIndex) || []
+  const currentCredentials = sortedCredentials.slice(startIndex, endIndex)
   const disabledCredentialCount = data?.credentials.filter(credential => credential.disabled).length || 0
   const selectedDisabledCount = Array.from(selectedIds).filter(id => {
     const credential = data?.credentials.find(c => c.id === id)
@@ -133,6 +156,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
     storage.removeApiKey()
     queryClient.clear()
     onLogout()
+  }
+
+  // 排序切换
+  const handleSortChange = (field: SortField) => {
+    if (field === sortField) {
+      // 同一字段：切换方向
+      setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortField(field)
+      setSortOrder(field === 'balance' ? 'desc' : 'asc')
+    }
+    setCurrentPage(1)
   }
 
   // 选择管理
@@ -550,9 +585,35 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
         {/* 凭据列表 */}
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-4">
               <h2 className="text-xl font-semibold">凭据管理</h2>
+              {/* 排序控件 */}
+              <div className="flex items-center gap-1">
+                {([
+                  ['default', '默认'],
+                  ['id', 'ID'],
+                  ['balance', '余额'],
+                ] as const).map(([field, label]) => {
+                  const active = sortField === field
+                  return (
+                    <Button
+                      key={field}
+                      size="sm"
+                      variant={active ? 'secondary' : 'ghost'}
+                      className="h-7 px-2 text-xs"
+                      onClick={() => handleSortChange(field)}
+                    >
+                      {label}
+                      {active && field !== 'default' && (
+                        sortOrder === 'asc'
+                          ? <ArrowUp className="h-3 w-3 ml-0.5" />
+                          : <ArrowDown className="h-3 w-3 ml-0.5" />
+                      )}
+                    </Button>
+                  )
+                })}
+              </div>
               {selectedIds.size > 0 && (
                 <div className="flex items-center gap-2">
                   <Badge variant="secondary">已选择 {selectedIds.size} 个</Badge>
