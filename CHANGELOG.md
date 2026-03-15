@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.1.11] - 2026-03-15
+
+### Fixed
+- **无凭据场景错误映射优化** — 当 `available_count() == 0`（无凭据或全部禁用）时，`call_api_with_retry` 和 `call_mcp_with_retry` 前置检查直接返回 `"没有可用的凭据"` 错误，避免进入 0 次重试的假逻辑；新增 `is_no_credentials_error()` 判定函数，在 `map_kiro_provider_error_to_response` 中映射为 503 SERVICE_UNAVAILABLE + `service_unavailable` 错误类型，替代原先的泛化 502 错误；补充单元测试验证错误识别逻辑 (`src/kiro/provider.rs`, `src/anthropic/handlers.rs`)
+
 ## [v1.1.10] - 2026-03-15
 
 ### Fixed

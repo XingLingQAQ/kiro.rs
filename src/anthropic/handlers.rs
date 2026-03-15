@@ -57,6 +57,11 @@ fn is_quota_exhausted_error(err: &Error) -> bool {
     s.contains("所有凭据已用尽")
 }
 
+fn is_no_credentials_error(err: &Error) -> bool {
+    let s = err.to_string();
+    s.contains("没有可用的凭据")
+}
+
 /// 网络错误关键字（is_transient_upstream_error 和 is_network_error 共用）
 const NETWORK_ERROR_PATTERNS: &[&str] = &[
     "error sending request",
@@ -339,6 +344,18 @@ fn map_kiro_provider_error_to_response(request_body: &str, err: Error) -> Respon
             Json(ErrorResponse::new(
                 "invalid_request_error",
                 "Improperly formed request. Check message content is not empty and request format is valid.",
+            )),
+        )
+            .into_response();
+    }
+
+    if is_no_credentials_error(&err) {
+        tracing::error!(error = %err, "没有可用的凭据");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse::new(
+                "service_unavailable",
+                "No credentials available. Please add or enable credentials via Admin API or credentials.json.",
             )),
         )
             .into_response();
@@ -1784,4 +1801,27 @@ fn is_likely_base64(s: &str) -> bool {
     s.bytes()
         .take(100)
         .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_no_credentials_error() {
+        let err = anyhow::anyhow!("没有可用的凭据");
+        assert!(is_no_credentials_error(&err));
+
+        let err = anyhow::anyhow!("所有凭据已用尽");
+        assert!(!is_no_credentials_error(&err));
+    }
+
+    #[test]
+    fn test_is_quota_exhausted_error() {
+        let err = anyhow::anyhow!("流式 API 请求失败（所有凭据已用尽）: 429 Quota exceeded");
+        assert!(is_quota_exhausted_error(&err));
+
+        let err = anyhow::anyhow!("没有可用的凭据（可用: 0/0），请添加或启用凭据后重试");
+        assert!(!is_quota_exhausted_error(&err));
+    }
 }

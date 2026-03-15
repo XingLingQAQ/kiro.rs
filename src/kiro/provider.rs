@@ -334,6 +334,10 @@ impl KiroProvider {
     /// 内部方法：带重试逻辑的 MCP API 调用
     async fn call_mcp_with_retry(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
         let total_credentials = self.token_manager.total_count();
+        let available = self.token_manager.available_count();
+        if available == 0 {
+            anyhow::bail!("没有可用的凭据");
+        }
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
         let mut forced_token_refresh: HashSet<u64> = HashSet::new();
@@ -546,6 +550,10 @@ impl KiroProvider {
         user_id: Option<&str>,
     ) -> anyhow::Result<reqwest::Response> {
         let total_credentials = self.token_manager.total_count();
+        let available = self.token_manager.available_count();
+        if available == 0 {
+            anyhow::bail!("没有可用的凭据");
+        }
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
         let mut forced_token_refresh: HashSet<u64> = HashSet::new();
