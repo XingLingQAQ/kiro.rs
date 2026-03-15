@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.1.8] - 2026-03-15
 
 ### Added
 - **Admin UI 全局代理配置热更新** — 新增 `GET/POST /api/admin/proxy` 端点，支持在 Admin UI 中查看和修改全局代理配置（proxyUrl/proxyUsername/proxyPassword），修改后运行时立即生效无需重启；`KiroProvider.global_proxy`/`default_client` 和 `MultiTokenManager.proxy` 改为 `RwLock` 实现内部可变性，更新时自动重建 HTTP Client 并清空凭据级 Client 缓存；配置变更同步持久化到 `config.json`；前端新增代理配置对话框和 Dashboard 入口卡片 (`src/kiro/provider.rs`, `src/kiro/token_manager.rs`, `src/admin/service.rs`, `src/admin/handlers.rs`, `src/admin/router.rs`, `src/main.rs`, `admin-ui/src/components/proxy-config-dialog.tsx`, `admin-ui/src/components/dashboard.tsx`)
