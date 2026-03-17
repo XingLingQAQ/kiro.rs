@@ -1032,8 +1032,9 @@ impl StreamContext {
             events.extend(self.create_text_delta_events(" "));
         }
 
-        // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
-        let final_input_tokens = self.context_input_tokens.unwrap_or(self.input_tokens);
+        // 始终使用本地估算的 input_tokens 返回给客户端，
+        // 避免因服务端压缩导致上游返回的 token 数偏低，使客户端误判上下文大小。
+        let final_input_tokens = self.input_tokens;
 
         #[cfg(feature = "sensitive-logs")]
         tracing::info!(
@@ -1041,9 +1042,9 @@ impl StreamContext {
             context_input_tokens = ?self.context_input_tokens,
             final_input_tokens,
             output_tokens = self.output_tokens,
-            "StreamContext usage: final_input_tokens={} (来源={}), output_tokens={}",
+            "StreamContext usage: final_input_tokens={} (估算值), context_input_tokens={} (上游值), output_tokens={}",
             final_input_tokens,
-            if self.context_input_tokens.is_some() { "contextUsageEvent" } else { "估算" },
+            self.context_input_tokens.map_or("N/A".to_string(), |v| v.to_string()),
             self.output_tokens
         );
 
@@ -1128,11 +1129,9 @@ impl BufferedStreamContext {
         let final_events = self.inner.generate_final_events();
         self.event_buffer.extend(final_events);
 
-        // 获取正确的 input_tokens
-        let final_input_tokens = self
-            .inner
-            .context_input_tokens
-            .unwrap_or(self.estimated_input_tokens);
+        // 始终使用本地估算的 input_tokens 返回给客户端，
+        // 避免因服务端压缩导致上游返回的 token 数偏低，使客户端误判上下文大小。
+        let final_input_tokens = self.estimated_input_tokens;
 
         #[cfg(feature = "sensitive-logs")]
         tracing::info!(
@@ -1140,9 +1139,9 @@ impl BufferedStreamContext {
             context_input_tokens = ?self.inner.context_input_tokens,
             final_input_tokens,
             output_tokens = self.inner.output_tokens,
-            "BufferedStreamContext usage: final_input_tokens={} (来源={}), output_tokens={}",
+            "BufferedStreamContext usage: final_input_tokens={} (估算值), context_input_tokens={} (上游值), output_tokens={}",
             final_input_tokens,
-            if self.inner.context_input_tokens.is_some() { "contextUsageEvent" } else { "估算" },
+            self.inner.context_input_tokens.map_or("N/A".to_string(), |v| v.to_string()),
             self.inner.output_tokens
         );
 

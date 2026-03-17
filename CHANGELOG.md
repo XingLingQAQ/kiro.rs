@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.1.12] - 2026-03-17
+
+### Fixed
+- **Usage 信息始终返回估算值** — `StreamContext` 和 `BufferedStreamContext` 的 `final_input_tokens` 改为始终使用本地估算值（`input_tokens` / `estimated_input_tokens`），不再使用上游 `contextUsageEvent` 计算的值；避免因服务端压缩导致返回的 token 数偏低，使客户端（如 Claude Code）误判上下文大小并重复触发压缩；`context_input_tokens` 仍保留用于日志记录和 `context_usage_percentage >= 100%` 判断 (`src/anthropic/stream.rs`)
+
 ## [v1.1.11] - 2026-03-15
 
 ### Fixed
