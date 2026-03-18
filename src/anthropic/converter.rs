@@ -141,32 +141,44 @@ fn count_images_in_content(content: &serde_json::Value) -> usize {
     }
 }
 
+/// Kiro 上游使用的规范模型 ID
+const KIRO_MODEL_SONNET_4_5: &str = "claude-sonnet-4.5";
+const KIRO_MODEL_SONNET_4_6: &str = "claude-sonnet-4.6";
+const KIRO_MODEL_OPUS_4_5: &str = "claude-opus-4.5";
+const KIRO_MODEL_OPUS_4_6: &str = "claude-opus-4.6";
+const KIRO_MODEL_HAIKU_4_5: &str = "claude-haiku-4.5";
+
+fn normalize_model_name(model: &str) -> String {
+    let model = model.to_lowercase();
+    let model = model.strip_suffix("-thinking").unwrap_or(&model);
+    let model = model.strip_suffix("-agentic").unwrap_or(model);
+    model.to_string()
+}
+
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
 ///
 /// 映射规则：
 /// - sonnet 且包含 4.6/4-6 → claude-sonnet-4.6，否则 → claude-sonnet-4.5
 /// - opus 且包含 4.5/4-5 → claude-opus-4.5，否则 → claude-opus-4.6
 /// - 所有 haiku → claude-haiku-4.5
-/// - `-agentic` 后缀会被剥离后再映射
+/// - `-thinking` / `-agentic` 后缀会被剥离后再映射
 pub fn map_model(model: &str) -> Option<String> {
-    let model_lower = model.to_lowercase();
-    // 剥离 -agentic 后缀再做模型映射
-    let model_lower = model_lower.strip_suffix("-agentic").unwrap_or(&model_lower);
+    let normalized_model = normalize_model_name(model);
 
-    if model_lower.contains("sonnet") {
-        if model_lower.contains("4-6") || model_lower.contains("4.6") {
-            Some("claude-sonnet-4.6".to_string())
+    if normalized_model.contains("sonnet") {
+        if normalized_model.contains("4-6") || normalized_model.contains("4.6") {
+            Some(KIRO_MODEL_SONNET_4_6.to_string())
         } else {
-            Some("claude-sonnet-4.5".to_string())
+            Some(KIRO_MODEL_SONNET_4_5.to_string())
         }
-    } else if model_lower.contains("opus") {
-        if model_lower.contains("4-5") || model_lower.contains("4.5") {
-            Some("claude-opus-4.5".to_string())
+    } else if normalized_model.contains("opus") {
+        if normalized_model.contains("4-5") || normalized_model.contains("4.5") {
+            Some(KIRO_MODEL_OPUS_4_5.to_string())
         } else {
-            Some("claude-opus-4.6".to_string())
+            Some(KIRO_MODEL_OPUS_4_6.to_string())
         }
-    } else if model_lower.contains("haiku") {
-        Some("claude-haiku-4.5".to_string())
+    } else if normalized_model.contains("haiku") {
+        Some(KIRO_MODEL_HAIKU_4_5.to_string())
     } else {
         None
     }
@@ -1394,43 +1406,45 @@ mod tests {
 
     #[test]
     fn test_map_model_sonnet() {
-        assert!(
-            map_model("claude-sonnet-4-20250514")
-                .unwrap()
-                .contains("sonnet")
+        assert_eq!(
+            map_model("claude-sonnet-4-20250514").unwrap(),
+            KIRO_MODEL_SONNET_4_5
         );
-        assert!(
-            map_model("claude-3-5-sonnet-20241022")
-                .unwrap()
-                .contains("sonnet")
+        assert_eq!(
+            map_model("claude-3-5-sonnet-20241022").unwrap(),
+            KIRO_MODEL_SONNET_4_5
         );
+        assert_eq!(map_model("claude-sonnet-4-6").unwrap(), KIRO_MODEL_SONNET_4_6);
+        assert_eq!(map_model("claude-sonnet-4.6").unwrap(), KIRO_MODEL_SONNET_4_6);
     }
 
     #[test]
     fn test_map_model_opus() {
-        // 不含 4.5/4-5 的 opus → 默认映射到最新版 4.6
         assert_eq!(
             map_model("claude-opus-4-20250514").unwrap(),
-            "claude-opus-4.6"
+            KIRO_MODEL_OPUS_4_6
         );
         assert_eq!(
             map_model("claude-opus-4-20260206").unwrap(),
-            "claude-opus-4.6"
+            KIRO_MODEL_OPUS_4_6
         );
-        // 显式 4.5 → 保留 4.5
         assert_eq!(
             map_model("claude-opus-4-5-20250514").unwrap(),
-            "claude-opus-4.5"
+            KIRO_MODEL_OPUS_4_5
         );
-        assert_eq!(map_model("claude-opus-4.5").unwrap(), "claude-opus-4.5");
+        assert_eq!(map_model("claude-opus-4.5").unwrap(), KIRO_MODEL_OPUS_4_5);
+        assert_eq!(map_model("claude-opus-4-6").unwrap(), KIRO_MODEL_OPUS_4_6);
     }
 
     #[test]
     fn test_map_model_haiku() {
-        assert!(
-            map_model("claude-haiku-4-20250514")
-                .unwrap()
-                .contains("haiku")
+        assert_eq!(
+            map_model("claude-haiku-4-20250514").unwrap(),
+            KIRO_MODEL_HAIKU_4_5
+        );
+        assert_eq!(
+            map_model("claude-haiku-4-5-20251001").unwrap(),
+            KIRO_MODEL_HAIKU_4_5
         );
     }
 
@@ -1440,31 +1454,94 @@ mod tests {
     }
 
     #[test]
-    fn test_map_model_thinking_suffix_sonnet() {
-        // thinking 后缀不应影响 sonnet 模型映射
-        let result = map_model("claude-sonnet-4-5-20250929-thinking");
-        assert_eq!(result, Some("claude-sonnet-4.5".to_string()));
+    fn test_map_model_thinking_suffixes() {
+        assert_eq!(
+            map_model("claude-sonnet-4-5-20250929-thinking"),
+            Some(KIRO_MODEL_SONNET_4_5.to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-4-6-thinking"),
+            Some(KIRO_MODEL_SONNET_4_6.to_string())
+        );
+        assert_eq!(
+            map_model("claude-opus-4-5-20251101-thinking"),
+            Some(KIRO_MODEL_OPUS_4_5.to_string())
+        );
+        assert_eq!(
+            map_model("claude-opus-4-6-thinking"),
+            Some(KIRO_MODEL_OPUS_4_6.to_string())
+        );
+        assert_eq!(
+            map_model("claude-haiku-4-5-20251001-thinking"),
+            Some(KIRO_MODEL_HAIKU_4_5.to_string())
+        );
     }
 
     #[test]
-    fn test_map_model_thinking_suffix_opus_4_5() {
-        // thinking 后缀不应影响 opus 4.5 模型映射
-        let result = map_model("claude-opus-4-5-20251101-thinking");
-        assert_eq!(result, Some("claude-opus-4.5".to_string()));
+    fn test_map_model_agentic_suffixes() {
+        assert_eq!(
+            map_model("claude-sonnet-4-6-agentic"),
+            Some(KIRO_MODEL_SONNET_4_6.to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-4-5-20250929-agentic"),
+            Some(KIRO_MODEL_SONNET_4_5.to_string())
+        );
+        assert_eq!(
+            map_model("claude-opus-4-6-agentic"),
+            Some(KIRO_MODEL_OPUS_4_6.to_string())
+        );
+        assert_eq!(
+            map_model("claude-opus-4-5-20251101-agentic"),
+            Some(KIRO_MODEL_OPUS_4_5.to_string())
+        );
+        assert_eq!(
+            map_model("claude-haiku-4-5-20251001-agentic"),
+            Some(KIRO_MODEL_HAIKU_4_5.to_string())
+        );
     }
 
     #[test]
-    fn test_map_model_thinking_suffix_opus_4_6() {
-        // thinking 后缀不应影响 opus 4.6 模型映射
-        let result = map_model("claude-opus-4-6-thinking");
-        assert_eq!(result, Some("claude-opus-4.6".to_string()));
-    }
+    fn test_map_model_versioned_entries_from_models_endpoint() {
+        let supported_models = [
+            ("claude-sonnet-4-6", KIRO_MODEL_SONNET_4_6),
+            ("claude-sonnet-4-6-thinking", KIRO_MODEL_SONNET_4_6),
+            ("claude-sonnet-4-6-agentic", KIRO_MODEL_SONNET_4_6),
+            ("claude-sonnet-4-5-20250929", KIRO_MODEL_SONNET_4_5),
+            (
+                "claude-sonnet-4-5-20250929-thinking",
+                KIRO_MODEL_SONNET_4_5,
+            ),
+            (
+                "claude-sonnet-4-5-20250929-agentic",
+                KIRO_MODEL_SONNET_4_5,
+            ),
+            ("claude-opus-4-5-20251101", KIRO_MODEL_OPUS_4_5),
+            (
+                "claude-opus-4-5-20251101-thinking",
+                KIRO_MODEL_OPUS_4_5,
+            ),
+            (
+                "claude-opus-4-5-20251101-agentic",
+                KIRO_MODEL_OPUS_4_5,
+            ),
+            ("claude-opus-4-6", KIRO_MODEL_OPUS_4_6),
+            ("claude-opus-4-6-thinking", KIRO_MODEL_OPUS_4_6),
+            ("claude-opus-4-6-agentic", KIRO_MODEL_OPUS_4_6),
+            ("claude-haiku-4-5-20251001", KIRO_MODEL_HAIKU_4_5),
+            (
+                "claude-haiku-4-5-20251001-thinking",
+                KIRO_MODEL_HAIKU_4_5,
+            ),
+            (
+                "claude-haiku-4-5-20251001-agentic",
+                KIRO_MODEL_HAIKU_4_5,
+            ),
+        ];
 
-    #[test]
-    fn test_map_model_thinking_suffix_haiku() {
-        // thinking 后缀不应影响 haiku 模型映射
-        let result = map_model("claude-haiku-4-5-20251001-thinking");
-        assert_eq!(result, Some("claude-haiku-4.5".to_string()));
+        for (input, expected) in supported_models {
+            assert_eq!(map_model(input), Some(expected.to_string()), "{input}");
+        }
     }
 
     #[test]
