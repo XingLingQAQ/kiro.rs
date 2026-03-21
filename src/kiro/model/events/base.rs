@@ -68,7 +68,7 @@ pub enum Event {
     /// 工具使用
     ToolUse(super::ToolUseEvent),
     /// 计费
-    Metering(()),
+    Metering(super::MeteringEvent),
     /// 上下文使用率
     ContextUsage(super::ContextUsageEvent),
     /// 未知事件 (保留原始帧数据)
@@ -116,7 +116,10 @@ impl Event {
                 let payload = super::ToolUseEvent::from_frame(&frame)?;
                 Ok(Self::ToolUse(payload))
             }
-            EventType::Metering => Ok(Self::Metering(())),
+            EventType::Metering => {
+                let payload = super::MeteringEvent::from_frame(&frame)?;
+                Ok(Self::Metering(payload))
+            }
             EventType::ContextUsage => {
                 let payload = super::ContextUsageEvent::from_frame(&frame)?;
                 Ok(Self::ContextUsage(payload))
@@ -182,5 +185,35 @@ mod tests {
             "assistantResponseEvent"
         );
         assert_eq!(EventType::ToolUse.as_str(), "toolUseEvent");
+    }
+
+    #[test]
+    fn test_parse_metering_event_payload() {
+        use crate::kiro::parser::header::{HeaderValue, Headers};
+
+        let mut headers = Headers::new();
+        headers.insert(
+            ":message-type".to_string(),
+            HeaderValue::String("event".to_string()),
+        );
+        headers.insert(
+            ":event-type".to_string(),
+            HeaderValue::String("meteringEvent".to_string()),
+        );
+
+        let frame = Frame {
+            headers,
+            payload: br#"{"unit":"credit","unitPlural":"credits","usage":0.25}"#.to_vec(),
+        };
+
+        let event = Event::from_frame(frame).unwrap();
+        match event {
+            Event::Metering(metering) => {
+                assert_eq!(metering.unit, "credit");
+                assert_eq!(metering.unit_plural, "credits");
+                assert_eq!(metering.usage, 0.25);
+            }
+            other => panic!("expected metering event, got {other:?}"),
+        }
     }
 }
