@@ -1414,8 +1414,14 @@ mod tests {
             map_model("claude-3-5-sonnet-20241022").unwrap(),
             KIRO_MODEL_SONNET_4_5
         );
-        assert_eq!(map_model("claude-sonnet-4-6").unwrap(), KIRO_MODEL_SONNET_4_6);
-        assert_eq!(map_model("claude-sonnet-4.6").unwrap(), KIRO_MODEL_SONNET_4_6);
+        assert_eq!(
+            map_model("claude-sonnet-4-6").unwrap(),
+            KIRO_MODEL_SONNET_4_6
+        );
+        assert_eq!(
+            map_model("claude-sonnet-4.6").unwrap(),
+            KIRO_MODEL_SONNET_4_6
+        );
     }
 
     #[test]
@@ -1508,35 +1514,17 @@ mod tests {
             ("claude-sonnet-4-6-thinking", KIRO_MODEL_SONNET_4_6),
             ("claude-sonnet-4-6-agentic", KIRO_MODEL_SONNET_4_6),
             ("claude-sonnet-4-5-20250929", KIRO_MODEL_SONNET_4_5),
-            (
-                "claude-sonnet-4-5-20250929-thinking",
-                KIRO_MODEL_SONNET_4_5,
-            ),
-            (
-                "claude-sonnet-4-5-20250929-agentic",
-                KIRO_MODEL_SONNET_4_5,
-            ),
+            ("claude-sonnet-4-5-20250929-thinking", KIRO_MODEL_SONNET_4_5),
+            ("claude-sonnet-4-5-20250929-agentic", KIRO_MODEL_SONNET_4_5),
             ("claude-opus-4-5-20251101", KIRO_MODEL_OPUS_4_5),
-            (
-                "claude-opus-4-5-20251101-thinking",
-                KIRO_MODEL_OPUS_4_5,
-            ),
-            (
-                "claude-opus-4-5-20251101-agentic",
-                KIRO_MODEL_OPUS_4_5,
-            ),
+            ("claude-opus-4-5-20251101-thinking", KIRO_MODEL_OPUS_4_5),
+            ("claude-opus-4-5-20251101-agentic", KIRO_MODEL_OPUS_4_5),
             ("claude-opus-4-6", KIRO_MODEL_OPUS_4_6),
             ("claude-opus-4-6-thinking", KIRO_MODEL_OPUS_4_6),
             ("claude-opus-4-6-agentic", KIRO_MODEL_OPUS_4_6),
             ("claude-haiku-4-5-20251001", KIRO_MODEL_HAIKU_4_5),
-            (
-                "claude-haiku-4-5-20251001-thinking",
-                KIRO_MODEL_HAIKU_4_5,
-            ),
-            (
-                "claude-haiku-4-5-20251001-agentic",
-                KIRO_MODEL_HAIKU_4_5,
-            ),
+            ("claude-haiku-4-5-20251001-thinking", KIRO_MODEL_HAIKU_4_5),
+            ("claude-haiku-4-5-20251001-agentic", KIRO_MODEL_HAIKU_4_5),
         ];
 
         for (input, expected) in supported_models {

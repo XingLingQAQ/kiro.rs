@@ -8,7 +8,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::common::utf8::floor_char_boundary;
-use crate::kiro::model::events::Event;
+use crate::kiro::model::events::{Event, MeteringEvent};
 
 /// 需要跳过的包裹字符
 ///
@@ -409,6 +409,7 @@ impl SseStateManager {
         &mut self,
         input_tokens: i32,
         output_tokens: i32,
+        metering: Option<&MeteringEvent>,
     ) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
@@ -429,6 +430,15 @@ impl SseStateManager {
         // 发送 message_delta
         if !self.message_delta_sent {
             self.message_delta_sent = true;
+            let mut usage = json!({
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens
+            });
+            if let Some(metering) = metering {
+                usage["credit_usage"] = json!(metering.usage);
+                usage["credit_unit"] = json!(metering.unit);
+                usage["credit_unit_plural"] = json!(metering.unit_plural);
+            }
             events.push(SseEvent::new(
                 "message_delta",
                 json!({
@@ -437,10 +447,7 @@ impl SseStateManager {
                         "stop_reason": self.get_stop_reason(),
                         "stop_sequence": null
                     },
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens
-                    }
+                    "usage": usage
                 }),
             ));
         }
@@ -486,6 +493,8 @@ pub struct StreamContext {
     pub thinking_block_index: Option<i32>,
     /// 文本块索引（按需动态分配）
     pub text_block_index: Option<i32>,
+    /// 上游 meteringEvent 透传的 credit usage，仅用于最终 usage 统计，不生成独立 SSE 事件
+    pub metering: Option<MeteringEvent>,
     /// 是否需要剥离 thinking 内容开头的换行符
     /// 模型输出 `<thinking>\n` 时，`\n` 可能与标签在同一 chunk 或下一 chunk
     strip_thinking_leading_newline: bool,
@@ -512,6 +521,7 @@ impl StreamContext {
             thinking_extracted: false,
             thinking_block_index: None,
             text_block_index: None,
+            metering: None,
             strip_thinking_leading_newline: false,
         }
     }
@@ -574,6 +584,16 @@ impl StreamContext {
                     context_usage.context_usage_percentage,
                     actual_input_tokens,
                     context_window as i32
+                );
+                Vec::new()
+            }
+            Event::Metering(metering) => {
+                self.metering = Some(metering.clone());
+                tracing::debug!(
+                    usage = metering.usage,
+                    unit = %metering.unit,
+                    unit_plural = %metering.unit_plural,
+                    "收到 meteringEvent"
                 );
                 Vec::new()
             }
@@ -1034,6 +1054,7 @@ impl StreamContext {
 
         // 始终使用本地估算的 input_tokens 返回给客户端，
         // 避免因服务端压缩导致上游返回的 token 数偏低，使客户端误判上下文大小。
+        // credit usage 则仅透传上游 meteringEvent，不影响本地 input/cache usage 语义。
         let final_input_tokens = self.input_tokens;
 
         #[cfg(feature = "sensitive-logs")]
@@ -1049,10 +1070,11 @@ impl StreamContext {
         );
 
         // 生成最终事件
-        events.extend(
-            self.state_manager
-                .generate_final_events(final_input_tokens, self.output_tokens),
-        );
+        events.extend(self.state_manager.generate_final_events(
+            final_input_tokens,
+            self.output_tokens,
+            self.metering.as_ref(),
+        ));
         events
     }
 }
@@ -1060,20 +1082,25 @@ impl StreamContext {
 /// 缓冲流处理上下文 - 用于 /cc/v1/messages 流式请求
 ///
 /// 与 `StreamContext` 不同，此上下文会缓冲所有事件直到流结束，
-/// 然后用从 `contextUsageEvent` 计算的正确 `input_tokens` 更正 `message_start` 事件。
+/// 然后把返回给客户端的 `input_tokens` 与 `cache_*` usage 固定为下游原始输入口径。
+/// 上游 `contextUsageEvent` 仍会被收集用于诊断，但不会覆盖 /cc/v1 的本地兼容统计。
 ///
 /// 工作流程：
 /// 1. 使用 `StreamContext` 正常处理所有 Kiro 事件
 /// 2. 把生成的 SSE 事件缓存起来（而不是立即发送）
-/// 3. 流结束时，找到 `message_start` 事件并更新其 `input_tokens`
+/// 3. 流结束时，找到 `message_start` / `message_delta` 事件并更新其 usage
 /// 4. 一次性返回所有事件
 pub struct BufferedStreamContext {
     /// 内部流处理上下文（复用现有的事件处理逻辑）
     inner: StreamContext,
     /// 缓冲的所有事件（包括 message_start、content_block_start 等）
     event_buffer: Vec<SseEvent>,
-    /// 估算的 input_tokens（用于回退）
+    /// 下游原始请求口径的 input_tokens（用于 /cc/v1 usage 回填）
     estimated_input_tokens: i32,
+    /// 下游原始请求口径的 cache_creation_input_tokens
+    cache_creation_input_tokens: i32,
+    /// 下游原始请求口径的 cache_read_input_tokens
+    cache_read_input_tokens: i32,
     /// 是否已经生成了初始事件
     initial_events_generated: bool,
 }
@@ -1083,6 +1110,8 @@ impl BufferedStreamContext {
     pub fn new(
         model: impl Into<String>,
         estimated_input_tokens: i32,
+        cache_creation_input_tokens: i32,
+        cache_read_input_tokens: i32,
         thinking_enabled: bool,
     ) -> Self {
         let inner =
@@ -1091,6 +1120,8 @@ impl BufferedStreamContext {
             inner,
             event_buffer: Vec::new(),
             estimated_input_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
             initial_events_generated: false,
         }
     }
@@ -1129,8 +1160,9 @@ impl BufferedStreamContext {
         let final_events = self.inner.generate_final_events();
         self.event_buffer.extend(final_events);
 
-        // 始终使用本地估算的 input_tokens 返回给客户端，
-        // 避免因服务端压缩导致上游返回的 token 数偏低，使客户端误判上下文大小。
+        // 始终使用下游原始请求口径的 usage 返回给客户端，
+        // 避免 prepare/压缩/上游注入提示词污染 /cc/v1 兼容统计。
+        // credit usage 仅透传上游 meteringEvent，不覆盖本地 raw input/cache usage。
         let final_input_tokens = self.estimated_input_tokens;
 
         #[cfg(feature = "sensitive-logs")]
@@ -1139,19 +1171,38 @@ impl BufferedStreamContext {
             context_input_tokens = ?self.inner.context_input_tokens,
             final_input_tokens,
             output_tokens = self.inner.output_tokens,
-            "BufferedStreamContext usage: final_input_tokens={} (估算值), context_input_tokens={} (上游值), output_tokens={}",
+            cache_creation_input_tokens = self.cache_creation_input_tokens,
+            cache_read_input_tokens = self.cache_read_input_tokens,
+            "BufferedStreamContext usage: final_input_tokens={} (下游 raw 估算值), context_input_tokens={} (上游诊断值), output_tokens={}",
             final_input_tokens,
             self.inner.context_input_tokens.map_or("N/A".to_string(), |v| v.to_string()),
             self.inner.output_tokens
         );
 
-        // 更正 message_start 事件中的 input_tokens
+        // 更正 message_start / message_delta 事件中的 usage
         for event in &mut self.event_buffer {
             if event.event == "message_start"
                 && let Some(message) = event.data.get_mut("message")
                 && let Some(usage) = message.get_mut("usage")
             {
                 usage["input_tokens"] = serde_json::json!(final_input_tokens);
+                usage["cache_creation_input_tokens"] =
+                    serde_json::json!(self.cache_creation_input_tokens);
+                usage["cache_read_input_tokens"] = serde_json::json!(self.cache_read_input_tokens);
+            }
+
+            if event.event == "message_delta"
+                && let Some(usage) = event.data.get_mut("usage")
+            {
+                usage["input_tokens"] = serde_json::json!(final_input_tokens);
+                usage["cache_creation_input_tokens"] =
+                    serde_json::json!(self.cache_creation_input_tokens);
+                usage["cache_read_input_tokens"] = serde_json::json!(self.cache_read_input_tokens);
+                if let Some(metering) = self.inner.metering.as_ref() {
+                    usage["credit_usage"] = serde_json::json!(metering.usage);
+                    usage["credit_unit"] = serde_json::json!(metering.unit);
+                    usage["credit_unit_plural"] = serde_json::json!(metering.unit_plural);
+                }
             }
         }
 
@@ -1226,6 +1277,60 @@ mod tests {
         // 重复 stop 应该被跳过
         let event = manager.handle_content_block_stop(0);
         assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_stream_context_includes_metering_in_message_delta_usage() {
+        let mut ctx = StreamContext::new_with_thinking("test-model", 123, false);
+        ctx.generate_initial_events();
+        ctx.process_kiro_event(&Event::Metering(MeteringEvent {
+            unit: "credit".to_string(),
+            unit_plural: "credits".to_string(),
+            usage: 0.75,
+        }));
+
+        let all_events = ctx.generate_final_events();
+        let usage = all_events
+            .iter()
+            .find(|e| e.event == "message_delta")
+            .map(|e| e.data["usage"].clone())
+            .expect("message_delta should exist");
+
+        assert_eq!(usage["input_tokens"], json!(123));
+        assert_eq!(usage["credit_usage"], json!(0.75));
+        assert_eq!(usage["credit_unit"], json!("credit"));
+        assert_eq!(usage["credit_unit_plural"], json!("credits"));
+    }
+
+    #[test]
+    fn test_buffered_stream_context_preserves_cc_usage_and_appends_metering() {
+        let mut ctx = BufferedStreamContext::new("test-model", 321, 7, 8, false);
+        ctx.process_and_buffer(&Event::Metering(MeteringEvent {
+            unit: "credit".to_string(),
+            unit_plural: "credits".to_string(),
+            usage: 1.25,
+        }));
+
+        let all_events = ctx.finish_and_get_all_events();
+        let message_start_usage = all_events
+            .iter()
+            .find(|e| e.event == "message_start")
+            .map(|e| e.data["message"]["usage"].clone())
+            .expect("message_start should exist");
+        let message_delta_usage = all_events
+            .iter()
+            .find(|e| e.event == "message_delta")
+            .map(|e| e.data["usage"].clone())
+            .expect("message_delta should exist");
+
+        assert_eq!(message_start_usage["input_tokens"], json!(321));
+        assert_eq!(message_start_usage["cache_creation_input_tokens"], json!(7));
+        assert_eq!(message_start_usage["cache_read_input_tokens"], json!(8));
+        assert!(message_start_usage.get("credit_usage").is_none());
+
+        assert_eq!(message_delta_usage["input_tokens"], json!(321));
+        assert_eq!(message_delta_usage["cache_creation_input_tokens"], json!(7));
+        assert_eq!(message_delta_usage["cache_read_input_tokens"], json!(8));
     }
 
     #[test]
@@ -1846,6 +1951,38 @@ mod tests {
 
         let text = collect_text_content(&all);
         assert_eq!(text, "world", "text should be 'world', got: {:?}", text);
+    }
+
+    #[test]
+    fn test_buffered_stream_context_preserves_raw_usage_and_cache_fields() {
+        let mut ctx = BufferedStreamContext::new("test-model", 321, 12, 34, false);
+        let all_events = ctx.finish_and_get_all_events();
+
+        let message_start = all_events
+            .iter()
+            .find(|e| e.event == "message_start")
+            .expect("should have message_start event");
+        let message_delta = all_events
+            .iter()
+            .find(|e| e.event == "message_delta")
+            .expect("should have message_delta event");
+
+        assert_eq!(message_start.data["message"]["usage"]["input_tokens"], 321);
+        assert_eq!(
+            message_start.data["message"]["usage"]["cache_creation_input_tokens"],
+            12
+        );
+        assert_eq!(
+            message_start.data["message"]["usage"]["cache_read_input_tokens"],
+            34
+        );
+
+        assert_eq!(message_delta.data["usage"]["input_tokens"], 321);
+        assert_eq!(
+            message_delta.data["usage"]["cache_creation_input_tokens"],
+            12
+        );
+        assert_eq!(message_delta.data["usage"]["cache_read_input_tokens"], 34);
     }
 
     #[test]

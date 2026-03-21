@@ -18,6 +18,12 @@ use uuid::Uuid;
 use super::stream::SseEvent;
 use super::types::{ErrorResponse, MessagesRequest};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WebSearchCacheContext {
+    pub cache_creation_input_tokens: i32,
+    pub cache_read_input_tokens: i32,
+}
+
 const WEB_SEARCH_PREFIX: &str = "Perform a web search for the query: ";
 
 /// MCP 请求
@@ -184,6 +190,7 @@ fn request_explicit_web_search_prefix(req: &MessagesRequest) -> bool {
 ///
 /// 注意：`tools` 里包含 `web_search` 仅代表“可用工具”，并不代表这次一定要执行搜索。
 /// 若不加额外条件，容易把普通对话/任务指令误当成搜索查询，导致 MCP 侧返回 -32602。
+/// 本地 WebSearch 不经过 Kiro 上游链路，因此不会收到 meteringEvent，也不会返回 credit_* usage 字段。
 pub fn should_handle_websearch_request(req: &MessagesRequest) -> bool {
     if !has_web_search_tool(req) {
         return false;
@@ -329,9 +336,16 @@ pub fn create_websearch_sse_stream(
     tool_use_id: String,
     search_results: Option<WebSearchResults>,
     input_tokens: i32,
+    cache_context: WebSearchCacheContext,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
-    let events =
-        generate_websearch_events(&model, &query, &tool_use_id, search_results, input_tokens);
+    let events = generate_websearch_events(
+        &model,
+        &query,
+        &tool_use_id,
+        search_results,
+        input_tokens,
+        cache_context,
+    );
 
     stream::iter(
         events
@@ -347,11 +361,13 @@ fn generate_websearch_events(
     tool_use_id: &str,
     search_results: Option<WebSearchResults>,
     input_tokens: i32,
+    cache_context: WebSearchCacheContext,
 ) -> Vec<SseEvent> {
     let mut events = Vec::new();
     let message_id = format!("msg_{}", &Uuid::new_v4().to_string().replace('-', "")[..24]);
 
     // 1. message_start
+    // /cc/v1 本地 WebSearch 的 usage 必须沿用外层基于 raw payload 预先计算的统计口径。
     events.push(SseEvent::new(
         "message_start",
         json!({
@@ -366,8 +382,8 @@ fn generate_websearch_events(
                 "usage": {
                     "input_tokens": input_tokens,
                     "output_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0
+                    "cache_creation_input_tokens": cache_context.cache_creation_input_tokens,
+                    "cache_read_input_tokens": cache_context.cache_read_input_tokens
                 }
             }
         }),
@@ -531,7 +547,10 @@ fn generate_websearch_events(
                 "stop_reason": "end_turn"
             },
             "usage": {
+                "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "cache_creation_input_tokens": cache_context.cache_creation_input_tokens,
+                "cache_read_input_tokens": cache_context.cache_read_input_tokens,
                 "server_tool_use": {
                     "web_search_requests": 1
                 }
@@ -581,6 +600,7 @@ pub async fn handle_websearch_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     payload: &MessagesRequest,
     input_tokens: i32,
+    cache_context: WebSearchCacheContext,
 ) -> Response {
     // 1. 提取搜索查询
     let query = match extract_search_query(payload) {
@@ -614,8 +634,14 @@ pub async fn handle_websearch_request(
     // 4. 生成 SSE 响应
     let model = payload.model.clone();
     if payload.stream {
-        let stream =
-            create_websearch_sse_stream(model, query, tool_use_id, search_results, input_tokens);
+        let stream = create_websearch_sse_stream(
+            model,
+            query,
+            tool_use_id,
+            search_results,
+            input_tokens,
+            cache_context,
+        );
 
         return Response::builder()
             .status(StatusCode::OK)
@@ -673,7 +699,9 @@ pub async fn handle_websearch_request(
         "stop_sequence": null,
         "usage": {
             "input_tokens": input_tokens,
-            "output_tokens": output_tokens
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_context.cache_creation_input_tokens,
+            "cache_read_input_tokens": cache_context.cache_read_input_tokens
         }
     });
 
@@ -710,6 +738,47 @@ async fn call_mcp_api(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_generate_websearch_events_uses_raw_usage_and_cache_context() {
+        let events = generate_websearch_events(
+            "claude-sonnet-4",
+            "rust",
+            "srvtoolu_test",
+            None,
+            123,
+            WebSearchCacheContext {
+                cache_creation_input_tokens: 7,
+                cache_read_input_tokens: 9,
+            },
+        );
+
+        let message_start = events
+            .iter()
+            .find(|e| e.event == "message_start")
+            .expect("should have message_start");
+        let message_delta = events
+            .iter()
+            .find(|e| e.event == "message_delta")
+            .expect("should have message_delta");
+
+        assert_eq!(message_start.data["message"]["usage"]["input_tokens"], 123);
+        assert_eq!(
+            message_start.data["message"]["usage"]["cache_creation_input_tokens"],
+            7
+        );
+        assert_eq!(
+            message_start.data["message"]["usage"]["cache_read_input_tokens"],
+            9
+        );
+
+        assert_eq!(message_delta.data["usage"]["input_tokens"], 123);
+        assert_eq!(
+            message_delta.data["usage"]["cache_creation_input_tokens"],
+            7
+        );
+        assert_eq!(message_delta.data["usage"]["cache_read_input_tokens"], 9);
+    }
 
     #[test]
     fn test_has_web_search_tool_only_one() {

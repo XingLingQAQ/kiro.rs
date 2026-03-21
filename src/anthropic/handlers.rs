@@ -2,7 +2,7 @@
 
 use std::convert::Infallible;
 
-use crate::kiro::model::events::Event;
+use crate::kiro::model::events::{Event, MeteringEvent};
 use crate::kiro::model::requests::kiro::KiroRequest;
 use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::token;
@@ -40,6 +40,73 @@ use super::types::{
     OutputConfig, Thinking,
 };
 use super::websearch;
+use super::websearch::WebSearchCacheContext;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CacheUsageContext {
+    cache_creation_input_tokens: i32,
+    cache_read_input_tokens: i32,
+}
+
+fn build_cache_usage_context(payload: &MessagesRequest) -> CacheUsageContext {
+    let system_tokens = payload
+        .system
+        .as_ref()
+        .map(|system| {
+            system
+                .iter()
+                .map(|msg| token::count_tokens(&msg.text) as i32)
+                .sum::<i32>()
+        })
+        .unwrap_or(0);
+
+    CacheUsageContext {
+        cache_creation_input_tokens: system_tokens.max(0),
+        cache_read_input_tokens: 0,
+    }
+}
+
+impl From<CacheUsageContext> for WebSearchCacheContext {
+    fn from(value: CacheUsageContext) -> Self {
+        Self {
+            cache_creation_input_tokens: value.cache_creation_input_tokens,
+            cache_read_input_tokens: value.cache_read_input_tokens,
+        }
+    }
+}
+
+fn raw_input_tokens(payload: &MessagesRequest) -> i32 {
+    token::count_all_tokens(
+        payload.model.clone(),
+        payload.system.clone(),
+        payload.messages.clone(),
+        payload.tools.clone(),
+    ) as i32
+}
+
+fn inject_cache_usage_fields(usage: &mut serde_json::Value, cache_context: CacheUsageContext) {
+    usage["cache_creation_input_tokens"] = json!(cache_context.cache_creation_input_tokens);
+    usage["cache_read_input_tokens"] = json!(cache_context.cache_read_input_tokens);
+}
+
+fn inject_credit_usage_fields(usage: &mut serde_json::Value, metering: &MeteringEvent) {
+    usage["credit_usage"] = json!(metering.usage);
+    usage["credit_unit"] = json!(metering.unit);
+    usage["credit_unit_plural"] = json!(metering.unit_plural);
+}
+
+fn prepared_payload_from_raw(raw_payload: &MessagesRequest) -> MessagesRequest {
+    let mut prepared_payload = raw_payload.clone();
+    override_thinking_from_model_name(&mut prepared_payload);
+    prepared_payload
+}
+
+fn strip_web_search_tools_if_needed(payload: &mut MessagesRequest) {
+    if websearch::has_web_search_tool(payload) {
+        tracing::info!("检测到混合工具列表中的 web_search，剔除后转发上游");
+        websearch::strip_web_search_tools(payload);
+    }
+}
 
 fn is_input_too_long_error(err: &Error) -> bool {
     // provider.rs 在遇到上游返回的 input-too-long 场景时，会在错误中保留以下关键字：
@@ -721,8 +788,13 @@ pub async fn post_messages(
     // 检查是否为纯 WebSearch 请求（仅 web_search 单工具 / tool_choice 强制 / 前缀匹配）
     if websearch::should_handle_websearch_request(&payload) {
         tracing::info!("检测到纯 WebSearch 请求，路由到本地 WebSearch 处理");
-        return websearch::handle_websearch_request(provider, &payload, estimated_input_tokens)
-            .await;
+        return websearch::handle_websearch_request(
+            provider,
+            &payload,
+            estimated_input_tokens,
+            WebSearchCacheContext::default(),
+        )
+        .await;
     }
 
     // 混合工具场景：剔除 web_search 后转发上游
@@ -900,6 +972,7 @@ pub async fn post_messages(
             &payload.model,
             estimated_input_tokens,
             user_id.as_deref(),
+            None,
         )
         .await
     }
@@ -1046,6 +1119,7 @@ async fn handle_non_stream_request(
     model: &str,
     input_tokens: i32,
     user_id: Option<&str>,
+    cache_context: Option<CacheUsageContext>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let response = match provider.call_api(request_body, user_id).await {
@@ -1081,6 +1155,8 @@ async fn handle_non_stream_request(
     let mut stop_reason = "end_turn".to_string();
     // 从 contextUsageEvent 计算的实际输入 tokens
     let mut context_input_tokens: Option<i32> = None;
+    // 从 meteringEvent 透传的 credit usage，仅用于最终 usage 字段
+    let mut metering: Option<MeteringEvent> = None;
 
     // 收集工具调用的增量 JSON
     let mut tool_json_buffers: std::collections::HashMap<String, String> =
@@ -1179,6 +1255,15 @@ async fn handle_non_stream_request(
                                 context_window as i32
                             );
                         }
+                        Event::Metering(event_metering) => {
+                            tracing::debug!(
+                                usage = event_metering.usage,
+                                unit = %event_metering.unit,
+                                unit_plural = %event_metering.unit_plural,
+                                "收到 meteringEvent"
+                            );
+                            metering = Some(event_metering);
+                        }
                         Event::Exception { exception_type, .. } => {
                             if exception_type == "ContentLengthExceededException" {
                                 stop_reason = "max_tokens".to_string();
@@ -1229,20 +1314,29 @@ async fn handle_non_stream_request(
         output_tokens
     );
 
-    // 构建 Anthropic 响应
-    let response_body = json!({
-        "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
-        "type": "message",
-        "role": "assistant",
-        "content": content,
-        "model": model,
-        "stop_reason": stop_reason,
-        "stop_sequence": null,
-        "usage": {
+    let response_body = {
+        let mut usage = json!({
             "input_tokens": final_input_tokens,
             "output_tokens": output_tokens
+        });
+        if let Some(ref metering) = metering {
+            inject_credit_usage_fields(&mut usage, metering);
         }
-    });
+        if let Some(cache_context) = cache_context {
+            inject_cache_usage_fields(&mut usage, cache_context);
+        }
+
+        json!({
+            "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
+            "type": "message",
+            "role": "assistant",
+            "content": content,
+            "model": model,
+            "stop_reason": stop_reason,
+            "stop_sequence": null,
+            "usage": usage
+        })
+    };
 
     (StatusCode::OK, Json(response_body)).into_response()
 }
@@ -1342,7 +1436,7 @@ pub async fn count_tokens(
 /// - message_start 中的 input_tokens 是从 contextUsageEvent 计算的准确值
 pub async fn post_messages_cc(
     State(state): State<AppState>,
-    JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
+    JsonExtractor(raw_payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     // 读取压缩配置快照（读锁 + clone，避免持锁跨 await）
     let compression_config = state.compression_config.read().clone();
@@ -1363,47 +1457,46 @@ pub async fn post_messages_cc(
         }
     };
 
-    // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
-    override_thinking_from_model_name(&mut payload);
-
-    // 估算压缩前 input tokens（需在 convert_request 之前）
-    let estimated_input_tokens = token::count_all_tokens(
-        payload.model.clone(),
-        payload.system.clone(),
-        payload.messages.clone(),
-        payload.tools.clone(),
-    ) as i32;
+    // raw payload 只用于 /cc/v1 兼容统计，绝不能被 prepare/strip/normalize/compress 污染。
+    let estimated_input_tokens = raw_input_tokens(&raw_payload);
+    let cache_context = build_cache_usage_context(&raw_payload);
 
     tracing::info!(
-        model = %payload.model,
-        max_tokens = %payload.max_tokens,
-        stream = %payload.stream,
-        message_count = %payload.messages.len(),
+        model = %raw_payload.model,
+        max_tokens = %raw_payload.max_tokens,
+        stream = %raw_payload.stream,
+        message_count = %raw_payload.messages.len(),
         estimated_input_tokens,
+        cache_creation_input_tokens = cache_context.cache_creation_input_tokens,
+        cache_read_input_tokens = cache_context.cache_read_input_tokens,
         "Received POST /cc/v1/messages request"
     );
 
-    // 检查是否为纯 WebSearch 请求（仅 web_search 单工具 / tool_choice 强制 / 前缀匹配）
-    if websearch::should_handle_websearch_request(&payload) {
+    // 本地 WebSearch 也必须遵守 raw payload usage 口径。
+    if websearch::should_handle_websearch_request(&raw_payload) {
         tracing::info!("检测到纯 WebSearch 请求，路由到本地 WebSearch 处理");
-        return websearch::handle_websearch_request(provider, &payload, estimated_input_tokens)
-            .await;
+        return websearch::handle_websearch_request(
+            provider,
+            &raw_payload,
+            estimated_input_tokens,
+            cache_context.into(),
+        )
+        .await;
     }
 
-    // 混合工具场景：剔除 web_search 后转发上游
-    if websearch::has_web_search_tool(&payload) {
-        tracing::info!("检测到混合工具列表中的 web_search，剔除后转发上游");
-        websearch::strip_web_search_tools(&mut payload);
-    }
+    // prepared payload 只用于发往 Kiro 的发送链路，后续所有 prepare/strip/convert/compress 均仅作用于此副本。
+    let mut prepared_payload = prepared_payload_from_raw(&raw_payload);
+
+    strip_web_search_tools_if_needed(&mut prepared_payload);
 
     // 剔除空 text content block（客户端可能将 tool_use-only 响应中的空 text block 写回 history）
-    let stripped = strip_empty_text_content_blocks(&mut payload.messages);
+    let stripped = strip_empty_text_content_blocks(&mut prepared_payload.messages);
     if stripped > 0 {
         tracing::info!(stripped, "已剔除空 text content block");
     }
 
     // 转换请求
-    let conversion_result = match convert_request(&payload, &compression_config) {
+    let conversion_result = match convert_request(&prepared_payload, &compression_config) {
         Ok(result) => result,
         Err(e) => {
             let (error_type, message) = match &e {
@@ -1465,7 +1558,7 @@ pub async fn post_messages_cc(
     // 请求体大小预检（上游存在硬性请求体大小限制；按实际序列化后的总字节数判断）
     let max_body = compression_config.max_request_body_bytes;
     if max_body > 0 && request_body.len() > max_body && compression_config.enabled {
-        // 自适应二次压缩：按 request_body_bytes 迭代截断，尽量把请求缩到阈值内
+        // 自适应二次压缩：仅压缩发往上游的 KiroRequest，不回流影响 /cc/v1 本地 usage/cache 统计。
         match adaptive_shrink_request_body(
             &mut kiro_request,
             &compression_config,
@@ -1539,34 +1632,35 @@ pub async fn post_messages_cc(
         "已构建 Kiro 请求体"
     );
 
-    // 检查是否启用了thinking
-    let thinking_enabled = payload
+    let thinking_enabled = prepared_payload
         .thinking
         .as_ref()
         .map(|t| t.is_enabled())
         .unwrap_or(false);
+    let user_id = prepared_payload
+        .metadata
+        .as_ref()
+        .and_then(|m| m.user_id.as_deref());
 
-    if payload.stream {
-        // 流式响应（缓冲模式）
-        let user_id = payload.metadata.as_ref().and_then(|m| m.user_id.as_deref());
+    if prepared_payload.stream {
         handle_stream_request_buffered(
             provider,
             &request_body,
-            &payload.model,
+            &prepared_payload.model,
             estimated_input_tokens,
+            cache_context,
             thinking_enabled,
             user_id,
         )
         .await
     } else {
-        // 非流式响应（复用现有逻辑，已经使用正确的 input_tokens）
-        let user_id = payload.metadata.as_ref().and_then(|m| m.user_id.as_deref());
         handle_non_stream_request(
             provider,
             &request_body,
-            &payload.model,
+            &prepared_payload.model,
             estimated_input_tokens,
             user_id,
+            Some(cache_context),
         )
         .await
     }
@@ -1581,6 +1675,7 @@ async fn handle_stream_request_buffered(
     request_body: &str,
     model: &str,
     estimated_input_tokens: i32,
+    cache_context: CacheUsageContext,
     thinking_enabled: bool,
     user_id: Option<&str>,
 ) -> Response {
@@ -1591,7 +1686,13 @@ async fn handle_stream_request_buffered(
     };
 
     // 创建缓冲流处理上下文
-    let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled);
+    let ctx = BufferedStreamContext::new(
+        model,
+        estimated_input_tokens,
+        cache_context.cache_creation_input_tokens,
+        cache_context.cache_read_input_tokens,
+        thinking_enabled,
+    );
 
     // 创建缓冲 SSE 流
     let stream = create_buffered_sse_stream(response, ctx);
@@ -1806,6 +1907,128 @@ fn is_likely_base64(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anthropic::types::{Message, SystemMessage};
+
+    fn sample_messages_request() -> MessagesRequest {
+        MessagesRequest {
+            model: "claude-sonnet-4-thinking".to_string(),
+            max_tokens: 1024,
+            messages: vec![
+                Message {
+                    role: "user".to_string(),
+                    content: serde_json::json!([
+                        {"type": "text", "text": "hello raw"},
+                        {"type": "text", "text": ""}
+                    ]),
+                },
+                Message {
+                    role: "assistant".to_string(),
+                    content: serde_json::json!("prefill that convert will drop"),
+                },
+            ],
+            stream: false,
+            system: Some(vec![SystemMessage {
+                text: "system cache seed".to_string(),
+            }]),
+            tools: Some(vec![crate::anthropic::types::Tool {
+                tool_type: Some("web_search_20250305".to_string()),
+                name: "web_search".to_string(),
+                description: "search web".to_string(),
+                input_schema: std::collections::HashMap::new(),
+                max_uses: Some(1),
+            }]),
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn test_raw_usage_does_not_follow_prepared_payload() {
+        let raw_payload = sample_messages_request();
+        let raw_tokens = raw_input_tokens(&raw_payload);
+
+        let mut prepared_payload = prepared_payload_from_raw(&raw_payload);
+        strip_web_search_tools_if_needed(&mut prepared_payload);
+        let stripped = strip_empty_text_content_blocks(&mut prepared_payload.messages);
+
+        assert!(
+            stripped > 0,
+            "prepared payload should strip empty text blocks"
+        );
+        assert!(
+            prepared_payload
+                .tools
+                .as_ref()
+                .is_none_or(|tools| tools.is_empty())
+        );
+        assert!(
+            prepared_payload.thinking.is_some(),
+            "prepared payload should override thinking"
+        );
+
+        let prepared_tokens = raw_input_tokens(&prepared_payload);
+        assert_ne!(
+            raw_tokens, prepared_tokens,
+            "raw/prepared token counts should diverge"
+        );
+    }
+
+    #[test]
+    fn test_cache_context_uses_raw_system_tokens() {
+        let raw_payload = sample_messages_request();
+        let cache_context = build_cache_usage_context(&raw_payload);
+        let expected = token::count_tokens("system cache seed") as i32;
+
+        assert_eq!(cache_context.cache_creation_input_tokens, expected);
+        assert_eq!(cache_context.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn test_inject_cache_usage_fields_only_for_cc_usage() {
+        let mut usage = serde_json::json!({
+            "input_tokens": 123,
+            "output_tokens": 45
+        });
+
+        inject_cache_usage_fields(
+            &mut usage,
+            CacheUsageContext {
+                cache_creation_input_tokens: 7,
+                cache_read_input_tokens: 8,
+            },
+        );
+
+        assert_eq!(usage["cache_creation_input_tokens"], 7);
+        assert_eq!(usage["cache_read_input_tokens"], 8);
+    }
+
+    #[test]
+    fn test_inject_credit_usage_fields_appends_metering_usage() {
+        let mut usage = serde_json::json!({
+            "input_tokens": 123,
+            "output_tokens": 45,
+            "cache_creation_input_tokens": 7,
+            "cache_read_input_tokens": 8
+        });
+
+        inject_credit_usage_fields(
+            &mut usage,
+            &MeteringEvent {
+                unit: "credit".to_string(),
+                unit_plural: "credits".to_string(),
+                usage: 0.5,
+            },
+        );
+
+        assert_eq!(usage["input_tokens"], 123);
+        assert_eq!(usage["cache_creation_input_tokens"], 7);
+        assert_eq!(usage["cache_read_input_tokens"], 8);
+        assert_eq!(usage["credit_usage"], json!(0.5));
+        assert_eq!(usage["credit_unit"], json!("credit"));
+        assert_eq!(usage["credit_unit_plural"], json!("credits"));
+    }
 
     #[test]
     fn test_is_no_credentials_error() {

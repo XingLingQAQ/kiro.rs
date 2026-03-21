@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Kiro credit usage 透传** — 新增 `meteringEvent` 真实 payload 解析模型，并在流式 `/v1`、缓冲流式 `/cc/v1` 与非流式响应的 `usage` / `message_delta.usage` 中透传 `credit_usage`、`credit_unit`、`credit_unit_plural`，同时保持现有 `input_tokens` 与 `cache_*` 本地兼容语义不变 (`src/kiro/model/events/metering.rs`, `src/kiro/model/events/base.rs`, `src/kiro/model/events/mod.rs`, `src/anthropic/stream.rs`, `src/anthropic/handlers.rs`)
+- **credit usage 回填回归测试** — 补充 `meteringEvent` 解析、流式 `message_delta.usage`、`/cc/v1` cache 与 credit 共存、非流式 usage 注入等单测，锁定透传行为 (`src/kiro/model/events/base.rs`, `src/anthropic/stream.rs`, `src/anthropic/handlers.rs`)
+
 ## [v1.1.12] - 2026-03-17
 
 ### Fixed
