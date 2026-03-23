@@ -90,6 +90,10 @@ pub struct Config {
     #[serde(default)]
     pub compression: CompressionConfig,
 
+    /// Prompt Cache TTL（秒），默认 300 秒
+    #[serde(default = "default_prompt_cache_ttl_seconds")]
+    pub prompt_cache_ttl_seconds: u64,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
@@ -122,6 +126,10 @@ fn default_node_version() -> String {
 
 fn default_count_tokens_auth_type() -> String {
     "x-api-key".to_string()
+}
+
+fn default_prompt_cache_ttl_seconds() -> u64 {
+    300
 }
 
 fn default_tls_backend() -> TlsBackend {
@@ -284,6 +292,7 @@ impl Default for Config {
             admin_api_key: None,
             credential_rpm: None,
             compression: CompressionConfig::default(),
+            prompt_cache_ttl_seconds: default_prompt_cache_ttl_seconds(),
             config_path: None,
         }
     }

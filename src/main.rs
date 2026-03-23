@@ -140,6 +140,7 @@ async fn main() {
         Some(kiro_provider.clone()),
         first_credentials.profile_arn.clone(),
         compression_config.clone(),
+        config.read().prompt_cache_ttl_seconds,
     );
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）

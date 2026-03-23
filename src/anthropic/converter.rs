@@ -2092,6 +2092,7 @@ mod tests {
                 description: String::new(),
                 input_schema: HashMap::new(),
                 max_uses: Some(8),
+                cache_control: None,
             },
             // 普通工具（应保留）
             AnthropicTool {
@@ -2104,6 +2105,7 @@ mod tests {
                     schema
                 },
                 max_uses: None,
+                cache_control: None,
             },
         ];
 
@@ -2130,6 +2132,7 @@ mod tests {
                 description: String::new(),
                 input_schema: HashMap::new(),
                 max_uses: Some(8),
+                cache_control: None,
             },
             AnthropicTool {
                 tool_type: Some("web_search_20260101".to_string()), // 假设的未来版本
@@ -2137,6 +2140,7 @@ mod tests {
                 description: String::new(),
                 input_schema: HashMap::new(),
                 max_uses: Some(10),
+                cache_control: None,
             },
         ];
 
@@ -2169,6 +2173,7 @@ mod tests {
                 description: "".to_string(), // 上游可能拒绝空 description
                 input_schema,                // 故意不带 $schema 等字段
                 max_uses: None,
+                cache_control: None,
             }]),
             tool_choice: None,
             thinking: None,
@@ -2349,6 +2354,7 @@ mod tests {
                 description: "read".to_string(),
                 input_schema: HashMap::new(),
                 max_uses: None,
+                cache_control: None,
             }]),
             tool_choice: None,
             thinking: None,
@@ -2509,6 +2515,8 @@ mod tests {
 
         let system = vec![SystemMessage {
             text: "You are a helpful assistant.".to_string(),
+            block_type: None,
+            cache_control: None,
         }];
 
         // 无工具 → 不注入 chunked policy
@@ -2556,6 +2564,7 @@ mod tests {
                 description: "Write a file".to_string(),
                 input_schema: HashMap::new(),
                 max_uses: None,
+                cache_control: None,
             }]),
             tool_choice: None,
             thinking: None,
@@ -2591,6 +2600,7 @@ mod tests {
                 description: "Edit a file".to_string(),
                 input_schema: HashMap::new(),
                 max_uses: None,
+                cache_control: None,
             }]),
             tool_choice: None,
             thinking: None,

@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- **Prompt Cache 本地命中追踪** — 新增 `cache_tracker` 模块，本地按请求内容和凭据维度模拟 Prompt Caching 命中，修复 `/cc/v1/messages` 连续对话中 `cache_read_input_tokens` 长期为 0 的问题；同时让 `KiroProvider` 返回实际命中的 `credential_id`，在成功请求后更新缓存状态 (`src/anthropic/cache_tracker.rs`, `src/anthropic/handlers.rs`, `src/kiro/provider.rs`, `src/token.rs`)
+- **Prompt Cache TTL 配置化** — 新增 `promptCacheTtlSeconds` 配置项，替代原先 300 秒硬编码，支持通过配置文件调整本地 Prompt Cache 的 TTL (`src/model/config.rs`, `src/anthropic/middleware.rs`, `src/anthropic/router.rs`, `src/main.rs`, `config.example.json`)
+
+### Changed
+- **Anthropic 类型补齐 cache_control 字段** — 为 `SystemMessage` 和 `Tool` 增加 `cache_control` 支持，并同步修正相关测试构造，确保缓存标记可以进入本地追踪逻辑 (`src/anthropic/types.rs`, `src/anthropic/converter.rs`, `src/anthropic/websearch.rs`, `src/anthropic/handlers.rs`)
+
+### Added
 - **Kiro credit usage 透传** — 新增 `meteringEvent` 真实 payload 解析模型，并在流式 `/v1`、缓冲流式 `/cc/v1` 与非流式响应的 `usage` / `message_delta.usage` 中透传 `credit_usage`、`credit_unit`、`credit_unit_plural`，同时保持现有 `input_tokens` 与 `cache_*` 本地兼容语义不变 (`src/kiro/model/events/metering.rs`, `src/kiro/model/events/base.rs`, `src/kiro/model/events/mod.rs`, `src/anthropic/stream.rs`, `src/anthropic/handlers.rs`)
 - **credit usage 回填回归测试** — 补充 `meteringEvent` 解析、流式 `message_delta.usage`、`/cc/v1` cache 与 credit 共存、非流式 usage 注入等单测，锁定透传行为 (`src/kiro/model/events/base.rs`, `src/anthropic/stream.rs`, `src/anthropic/handlers.rs`)
 

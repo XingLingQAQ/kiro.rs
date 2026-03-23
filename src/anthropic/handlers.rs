@@ -48,21 +48,23 @@ struct CacheUsageContext {
     cache_read_input_tokens: i32,
 }
 
-fn build_cache_usage_context(payload: &MessagesRequest) -> CacheUsageContext {
-    let system_tokens = payload
-        .system
-        .as_ref()
-        .map(|system| {
-            system
-                .iter()
-                .map(|msg| token::count_tokens(&msg.text) as i32)
-                .sum::<i32>()
-        })
-        .unwrap_or(0);
+fn build_cache_profile(
+    cache_tracker: &crate::anthropic::cache_tracker::CacheTracker,
+    payload: &MessagesRequest,
+    total_input_tokens: i32,
+) -> crate::anthropic::cache_tracker::CacheProfile {
+    cache_tracker.build_profile(payload, total_input_tokens)
+}
 
+fn compute_cache_usage(
+    cache_tracker: &crate::anthropic::cache_tracker::CacheTracker,
+    credential_id: u64,
+    profile: &crate::anthropic::cache_tracker::CacheProfile,
+) -> CacheUsageContext {
+    let result = cache_tracker.compute(credential_id, profile);
     CacheUsageContext {
-        cache_creation_input_tokens: system_tokens.max(0),
-        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: result.cache_creation_input_tokens,
+        cache_read_input_tokens: result.cache_read_input_tokens,
     }
 }
 
@@ -968,6 +970,8 @@ pub async fn post_messages(
         // 非流式响应
         handle_non_stream_request(
             provider,
+            None,
+            None,
             &request_body,
             &payload.model,
             estimated_input_tokens,
@@ -986,7 +990,7 @@ async fn handle_stream_request(
     user_id: Option<&str>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api_stream(request_body, user_id).await {
+    let api_result = match provider.call_api_stream(request_body, user_id).await {
         Ok(resp) => resp,
         Err(e) => return map_kiro_provider_error_to_response(request_body, e),
     };
@@ -998,7 +1002,7 @@ async fn handle_stream_request(
     let initial_events = ctx.generate_initial_events();
 
     // 创建 SSE 流
-    let stream = create_sse_stream(response, ctx, initial_events);
+    let stream = create_sse_stream(api_result.response, ctx, initial_events);
 
     // 返回 SSE 响应
     Response::builder()
@@ -1115,6 +1119,8 @@ fn create_sse_stream(
 /// 处理非流式请求
 async fn handle_non_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    cache_tracker: Option<&std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>>,
+    cache_profile: Option<&crate::anthropic::cache_tracker::CacheProfile>,
     request_body: &str,
     model: &str,
     input_tokens: i32,
@@ -1122,13 +1128,18 @@ async fn handle_non_stream_request(
     cache_context: Option<CacheUsageContext>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api(request_body, user_id).await {
+    let api_result = match provider.call_api(request_body, user_id).await {
         Ok(resp) => resp,
         Err(e) => return map_kiro_provider_error_to_response(request_body, e),
     };
 
+    // 用真实的 credential_id 更新 cache
+    if let (Some(tracker), Some(profile)) = (cache_tracker, cache_profile) {
+        tracker.update(api_result.credential_id, profile);
+    }
+
     // 读取响应体
-    let body_bytes = match response.bytes().await {
+    let body_bytes = match api_result.response.bytes().await {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::error!("读取响应体失败: {}", e);
@@ -1459,7 +1470,13 @@ pub async fn post_messages_cc(
 
     // raw payload 只用于 /cc/v1 兼容统计，绝不能被 prepare/strip/normalize/compress 污染。
     let estimated_input_tokens = raw_input_tokens(&raw_payload);
-    let cache_context = build_cache_usage_context(&raw_payload);
+
+    // 构建 cache profile（不需要 credential_id）
+    let cache_profile =
+        build_cache_profile(&state.cache_tracker, &raw_payload, estimated_input_tokens);
+
+    // 初步计算 cache usage（使用临时 credential_id=0，仅用于日志）
+    let cache_context = compute_cache_usage(&state.cache_tracker, 0, &cache_profile);
 
     tracing::info!(
         model = %raw_payload.model,
@@ -1645,6 +1662,8 @@ pub async fn post_messages_cc(
     if prepared_payload.stream {
         handle_stream_request_buffered(
             provider,
+            &state.cache_tracker,
+            &cache_profile,
             &request_body,
             &prepared_payload.model,
             estimated_input_tokens,
@@ -1656,6 +1675,8 @@ pub async fn post_messages_cc(
     } else {
         handle_non_stream_request(
             provider,
+            Some(&state.cache_tracker),
+            Some(&cache_profile),
             &request_body,
             &prepared_payload.model,
             estimated_input_tokens,
@@ -1672,6 +1693,8 @@ pub async fn post_messages_cc(
 /// 然后用从 contextUsageEvent 计算的正确 input_tokens 生成 message_start 事件。
 async fn handle_stream_request_buffered(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    cache_tracker: &std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>,
+    cache_profile: &crate::anthropic::cache_tracker::CacheProfile,
     request_body: &str,
     model: &str,
     estimated_input_tokens: i32,
@@ -1680,10 +1703,13 @@ async fn handle_stream_request_buffered(
     user_id: Option<&str>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api_stream(request_body, user_id).await {
+    let api_result = match provider.call_api_stream(request_body, user_id).await {
         Ok(resp) => resp,
         Err(e) => return map_kiro_provider_error_to_response(request_body, e),
     };
+
+    // 用真实的 credential_id 更新 cache
+    cache_tracker.update(api_result.credential_id, cache_profile);
 
     // 创建缓冲流处理上下文
     let ctx = BufferedStreamContext::new(
@@ -1695,7 +1721,7 @@ async fn handle_stream_request_buffered(
     );
 
     // 创建缓冲 SSE 流
-    let stream = create_buffered_sse_stream(response, ctx);
+    let stream = create_buffered_sse_stream(api_result.response, ctx);
 
     // 返回 SSE 响应
     Response::builder()
@@ -1910,6 +1936,10 @@ mod tests {
     use crate::anthropic::types::{Message, SystemMessage};
 
     fn sample_messages_request() -> MessagesRequest {
+        // 生成一个超过 1024 tokens 的 system message 用于测试缓存
+        let long_text = "This is a test system message. ".repeat(100); // 约 600 tokens
+        let very_long_text = format!("{}{}", long_text, long_text); // 约 1200 tokens
+
         MessagesRequest {
             model: "claude-sonnet-4-thinking".to_string(),
             max_tokens: 1024,
@@ -1928,7 +1958,12 @@ mod tests {
             ],
             stream: false,
             system: Some(vec![SystemMessage {
-                text: "system cache seed".to_string(),
+                text: very_long_text,
+                block_type: Some("text".to_string()),
+                cache_control: Some(crate::anthropic::types::CacheControl {
+                    cache_type: "ephemeral".to_string(),
+                    ttl: None,
+                }),
             }]),
             tools: Some(vec![crate::anthropic::types::Tool {
                 tool_type: Some("web_search_20250305".to_string()),
@@ -1936,6 +1971,7 @@ mod tests {
                 description: "search web".to_string(),
                 input_schema: std::collections::HashMap::new(),
                 max_uses: Some(1),
+                cache_control: None,
             }]),
             tool_choice: None,
             thinking: None,
@@ -1978,9 +2014,18 @@ mod tests {
     #[test]
     fn test_cache_context_uses_raw_system_tokens() {
         let raw_payload = sample_messages_request();
-        let cache_context = build_cache_usage_context(&raw_payload);
-        let expected = token::count_tokens("system cache seed") as i32;
 
+        let cache_tracker =
+            crate::anthropic::cache_tracker::CacheTracker::new(std::time::Duration::from_secs(300));
+
+        // 计算实际的 system message tokens
+        let system_text = &raw_payload.system.as_ref().unwrap()[0].text;
+        let expected = token::count_tokens(system_text) as i32;
+
+        let cache_profile = build_cache_profile(&cache_tracker, &raw_payload, expected);
+        let cache_context = compute_cache_usage(&cache_tracker, 0, &cache_profile);
+
+        // 验证 cache_creation_input_tokens 等于 system message 的 token 数
         assert_eq!(cache_context.cache_creation_input_tokens, expected);
         assert_eq!(cache_context.cache_read_input_tokens, 0);
     }

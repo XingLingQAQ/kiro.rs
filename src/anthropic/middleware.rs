@@ -15,6 +15,7 @@ use crate::common::auth;
 use crate::kiro::provider::KiroProvider;
 use crate::model::config::CompressionConfig;
 
+use super::cache_tracker::CacheTracker;
 use super::types::ErrorResponse;
 
 /// 应用共享状态
@@ -29,16 +30,21 @@ pub struct AppState {
     pub profile_arn: Option<String>,
     /// 输入压缩配置（共享引用，支持热更新）
     pub compression_config: Arc<RwLock<CompressionConfig>>,
+    /// 缓存追踪器（用于本地模拟 Prompt Caching）
+    pub cache_tracker: Arc<CacheTracker>,
 }
 
 impl AppState {
     /// 创建新的应用状态
-    pub fn new(api_key: impl Into<String>) -> Self {
+    pub fn new(api_key: impl Into<String>, prompt_cache_ttl_seconds: u64) -> Self {
         Self {
             api_key: api_key.into(),
             kiro_provider: None,
             profile_arn: None,
             compression_config: Arc::new(RwLock::new(CompressionConfig::default())),
+            cache_tracker: Arc::new(CacheTracker::new(std::time::Duration::from_secs(
+                prompt_cache_ttl_seconds,
+            ))),
         }
     }
 

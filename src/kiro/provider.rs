@@ -20,6 +20,12 @@ use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::{CallContext, MultiTokenManager};
 
+/// API 调用结果
+pub struct ApiCallResult {
+    pub response: reqwest::Response,
+    pub credential_id: u64,
+}
+
 /// 每个凭据的最大重试次数
 const MAX_RETRIES_PER_CREDENTIAL: usize = 2;
 
@@ -293,7 +299,7 @@ impl KiroProvider {
         &self,
         request_body: &str,
         user_id: Option<&str>,
-    ) -> anyhow::Result<reqwest::Response> {
+    ) -> anyhow::Result<ApiCallResult> {
         self.call_api_with_retry(request_body, false, user_id).await
     }
 
@@ -314,7 +320,7 @@ impl KiroProvider {
         &self,
         request_body: &str,
         user_id: Option<&str>,
-    ) -> anyhow::Result<reqwest::Response> {
+    ) -> anyhow::Result<ApiCallResult> {
         self.call_api_with_retry(request_body, true, user_id).await
     }
 
@@ -548,7 +554,7 @@ impl KiroProvider {
         request_body: &str,
         is_stream: bool,
         user_id: Option<&str>,
-    ) -> anyhow::Result<reqwest::Response> {
+    ) -> anyhow::Result<ApiCallResult> {
         let total_credentials = self.token_manager.total_count();
         let available = self.token_manager.available_count();
         if available == 0 {
@@ -630,7 +636,10 @@ impl KiroProvider {
                 tracing::info!(credential_id = %ctx.id, "API 请求成功");
                 // 后台异步刷新余额缓存
                 self.spawn_balance_refresh(ctx.id);
-                return Ok(response);
+                return Ok(ApiCallResult {
+                    response,
+                    credential_id: ctx.id,
+                });
             }
 
             // 失败响应：读取 body 用于日志/错误信息
