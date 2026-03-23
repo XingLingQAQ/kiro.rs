@@ -10,7 +10,7 @@ use anyhow::Error;
 use axum::{
     Json as JsonExtractor,
     body::Body,
-    extract::State,
+    extract::{OriginalUri, State},
     http::{StatusCode, header},
     response::{IntoResponse, Json, Response},
 };
@@ -543,11 +543,15 @@ fn strip_empty_text_content_blocks(messages: &mut [super::types::Message]) -> us
     removed
 }
 
-/// GET /v1/models
+/// GET /v1/models, GET /cc/v1/models
 ///
-/// 返回可用的模型列表
-pub async fn get_models() -> impl IntoResponse {
-    tracing::info!("Received GET /v1/models request");
+/// 返回可用的模型列表。
+/// 其中 `/cc/v1/models` 用于 Claude Code 优化 API，响应内容与 `/v1/models` 保持一致。
+pub async fn get_models(OriginalUri(uri): OriginalUri) -> impl IntoResponse {
+    tracing::info!(
+        path = %uri.path(),
+        "Received request"
+    );
 
     let models = vec![
         Model {
@@ -742,6 +746,7 @@ pub async fn get_models() -> impl IntoResponse {
 ///
 /// 创建消息（对话）
 pub async fn post_messages(
+    OriginalUri(uri): OriginalUri,
     State(state): State<AppState>,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
@@ -763,13 +768,14 @@ pub async fn post_messages(
     ) as i32;
 
     tracing::info!(
+        path = %uri.path(),
         model = %payload.model,
         max_tokens = %payload.max_tokens,
         stream = %payload.stream,
         message_count = %payload.messages.len(),
         user_id = %mask_user_id(user_id.as_deref()),
         estimated_input_tokens,
-        "Received POST /v1/messages request"
+        "Received request"
     );
     // 检查 KiroProvider 是否可用
     let provider = match &state.kiro_provider {
@@ -1416,16 +1422,19 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
     }
 }
 
-/// POST /v1/messages/count_tokens
+/// POST /v1/messages/count_tokens, POST /cc/v1/messages/count_tokens
 ///
-/// 计算消息的 token 数量
+/// 计算消息的 token 数量。
+/// 其中 `/cc/v1/messages/count_tokens` 用于 Claude Code 优化 API，计算逻辑与 `/v1/messages/count_tokens` 保持一致。
 pub async fn count_tokens(
+    OriginalUri(uri): OriginalUri,
     JsonExtractor(payload): JsonExtractor<CountTokensRequest>,
 ) -> impl IntoResponse {
     tracing::info!(
+        path = %uri.path(),
         model = %payload.model,
         message_count = %payload.messages.len(),
-        "Received POST /v1/messages/count_tokens request"
+        "Received request"
     );
 
     let total_tokens = token::count_all_tokens(
@@ -1442,10 +1451,11 @@ pub async fn count_tokens(
 
 /// POST /cc/v1/messages
 ///
-/// Claude Code 兼容端点，与 /v1/messages 的区别在于：
+/// Claude Code 优化 API，与 /v1/messages 的区别在于：
 /// - 流式响应会等待 kiro 端返回 contextUsageEvent 后再发送 message_start
 /// - message_start 中的 input_tokens 是从 contextUsageEvent 计算的准确值
 pub async fn post_messages_cc(
+    OriginalUri(uri): OriginalUri,
     State(state): State<AppState>,
     JsonExtractor(raw_payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
@@ -1479,6 +1489,7 @@ pub async fn post_messages_cc(
     let cache_context = compute_cache_usage(&state.cache_tracker, 0, &cache_profile);
 
     tracing::info!(
+        path = %uri.path(),
         model = %raw_payload.model,
         max_tokens = %raw_payload.max_tokens,
         stream = %raw_payload.stream,
@@ -1486,7 +1497,7 @@ pub async fn post_messages_cc(
         estimated_input_tokens,
         cache_creation_input_tokens = cache_context.cache_creation_input_tokens,
         cache_read_input_tokens = cache_context.cache_read_input_tokens,
-        "Received POST /cc/v1/messages request"
+        "Received request"
     );
 
     // 本地 WebSearch 也必须遵守 raw payload usage 口径。

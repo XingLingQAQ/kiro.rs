@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- **Claude Code 优化 API 暴露 models 入口** — 新增 `GET /cc/v1/models`，复用现有模型列表实现并补全启动日志，明确 `/cc/v1/*` 为 Claude Code 优化 API，便于客户端发现可用接口 (`src/anthropic/router.rs`, `src/anthropic/handlers.rs`, `src/anthropic/mod.rs`, `src/main.rs`, `CLAUDE.md`)
+
+### Changed
+- **请求访问日志统一输出实际路径** — `/v1` 与 `/cc/v1` 的 `models`、`messages`、`count_tokens` 日志统一输出 `path` 字段并使用一致消息名，便于日志检索与区分实际访问接口 (`src/anthropic/handlers.rs`)
+
+### Added
 - **Prompt Cache 本地命中追踪** — 新增 `cache_tracker` 模块，本地按请求内容和凭据维度模拟 Prompt Caching 命中，修复 `/cc/v1/messages` 连续对话中 `cache_read_input_tokens` 长期为 0 的问题；同时让 `KiroProvider` 返回实际命中的 `credential_id`，在成功请求后更新缓存状态 (`src/anthropic/cache_tracker.rs`, `src/anthropic/handlers.rs`, `src/kiro/provider.rs`, `src/token.rs`)
 - **Prompt Cache TTL 配置化** — 新增 `promptCacheTtlSeconds` 配置项，替代原先 300 秒硬编码，支持通过配置文件调整本地 Prompt Cache 的 TTL (`src/model/config.rs`, `src/anthropic/middleware.rs`, `src/anthropic/router.rs`, `src/main.rs`, `config.example.json`)
 

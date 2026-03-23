@@ -27,6 +27,9 @@ const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
 /// - `GET /v1/models` - 获取可用模型列表
 /// - `POST /v1/messages` - 创建消息（对话）
 /// - `POST /v1/messages/count_tokens` - 计算 token 数量
+/// - `GET /cc/v1/models` - 获取 Claude Code 优化 API 的模型列表（与 /v1/models 一致）
+/// - `POST /cc/v1/messages` - Claude Code 优化 API 消息接口
+/// - `POST /cc/v1/messages/count_tokens` - Claude Code 优化 API 的 Token 计数
 ///
 /// # 认证
 /// 所有 `/v1` 路径需要 API Key 认证，支持：
@@ -64,9 +67,10 @@ pub fn create_router_with_provider(
             auth_middleware,
         ));
 
-    // 需要认证的 /cc/v1 路由（Claude Code 兼容端点）
-    // 与 /v1 的区别：流式响应会等待 contextUsageEvent 后再发送 message_start
+    // 需要认证的 /cc/v1 路由（Claude Code 优化 API）
+    // 与 /v1 的区别：/messages 使用 Claude Code 专用流式兼容逻辑，/models 与 /count_tokens 返回结果与 /v1 对齐
     let cc_v1_routes = Router::new()
+        .route("/models", get(get_models))
         .route("/messages", post(post_messages_cc))
         .route("/messages/count_tokens", post(count_tokens))
         .layer(middleware::from_fn_with_state(

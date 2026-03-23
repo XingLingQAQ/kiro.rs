@@ -95,7 +95,7 @@ AppState {
 - `GET /v1/models` - 获取可用模型列表
 - `POST /v1/messages` - 创建消息（Anthropic 格式）
 - `POST /v1/messages/count_tokens` - Token 计数
-- `/cc/v1/*` - Claude Code 兼容端点（同上，路径别名）
+- `/cc/v1/*` - Claude Code 优化 API（其中 messages 走专用流式优化逻辑，models/count_tokens 与 `/v1` 对齐）
 
 **Admin API** (需配置 `adminApiKey`):
 - 凭据 CRUD、状态监控、余额查询
