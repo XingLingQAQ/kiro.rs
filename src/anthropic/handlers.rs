@@ -40,7 +40,6 @@ use super::types::{
     OutputConfig, Thinking,
 };
 use super::websearch;
-use super::websearch::WebSearchCacheContext;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct CacheUsageContext {
@@ -68,13 +67,19 @@ fn compute_cache_usage(
     }
 }
 
-impl From<CacheUsageContext> for WebSearchCacheContext {
-    fn from(value: CacheUsageContext) -> Self {
-        Self {
-            cache_creation_input_tokens: value.cache_creation_input_tokens,
-            cache_read_input_tokens: value.cache_read_input_tokens,
-        }
-    }
+fn provisional_cache_usage(
+    cache_tracker: &crate::anthropic::cache_tracker::CacheTracker,
+    profile: &crate::anthropic::cache_tracker::CacheProfile,
+) -> CacheUsageContext {
+    compute_cache_usage(cache_tracker, 0, profile)
+}
+
+fn resolved_cache_usage(
+    cache_tracker: &crate::anthropic::cache_tracker::CacheTracker,
+    credential_id: u64,
+    profile: &crate::anthropic::cache_tracker::CacheProfile,
+) -> CacheUsageContext {
+    compute_cache_usage(cache_tracker, credential_id, profile)
 }
 
 fn raw_input_tokens(payload: &MessagesRequest) -> i32 {
@@ -799,8 +804,9 @@ pub async fn post_messages(
         return websearch::handle_websearch_request(
             provider,
             &payload,
+            &state.cache_tracker,
+            &build_cache_profile(&state.cache_tracker, &payload, estimated_input_tokens),
             estimated_input_tokens,
-            WebSearchCacheContext::default(),
         )
         .await;
     }
@@ -976,12 +982,11 @@ pub async fn post_messages(
         // 非流式响应
         handle_non_stream_request(
             provider,
-            None,
-            None,
             &request_body,
             &payload.model,
             estimated_input_tokens,
             user_id.as_deref(),
+            None,
             None,
         )
         .await
@@ -1125,13 +1130,12 @@ fn create_sse_stream(
 /// 处理非流式请求
 async fn handle_non_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
-    cache_tracker: Option<&std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>>,
-    cache_profile: Option<&crate::anthropic::cache_tracker::CacheProfile>,
     request_body: &str,
     model: &str,
     input_tokens: i32,
     user_id: Option<&str>,
-    cache_context: Option<CacheUsageContext>,
+    cache_tracker: Option<&std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>>,
+    cache_profile: Option<&crate::anthropic::cache_tracker::CacheProfile>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let api_result = match provider.call_api(request_body, user_id).await {
@@ -1139,10 +1143,20 @@ async fn handle_non_stream_request(
         Err(e) => return map_kiro_provider_error_to_response(request_body, e),
     };
 
-    // 用真实的 credential_id 更新 cache
-    if let (Some(tracker), Some(profile)) = (cache_tracker, cache_profile) {
-        tracker.update(api_result.credential_id, profile);
-    }
+    let final_cache_context = match (cache_tracker, cache_profile) {
+        (Some(tracker), Some(profile)) => {
+            let resolved = resolved_cache_usage(tracker, api_result.credential_id, profile);
+            tracing::info!(
+                credential_id = api_result.credential_id,
+                final_cache_creation_input_tokens = resolved.cache_creation_input_tokens,
+                final_cache_read_input_tokens = resolved.cache_read_input_tokens,
+                "Resolved cache usage for non-stream request"
+            );
+            tracker.update(api_result.credential_id, profile);
+            Some(resolved)
+        }
+        _ => None,
+    };
 
     // 读取响应体
     let body_bytes = match api_result.response.bytes().await {
@@ -1339,7 +1353,7 @@ async fn handle_non_stream_request(
         if let Some(ref metering) = metering {
             inject_credit_usage_fields(&mut usage, metering);
         }
-        if let Some(cache_context) = cache_context {
+        if let Some(cache_context) = final_cache_context {
             inject_cache_usage_fields(&mut usage, cache_context);
         }
 
@@ -1481,37 +1495,6 @@ pub async fn post_messages_cc(
     // raw payload 只用于 /cc/v1 兼容统计，绝不能被 prepare/strip/normalize/compress 污染。
     let estimated_input_tokens = raw_input_tokens(&raw_payload);
 
-    // 构建 cache profile（不需要 credential_id）
-    let cache_profile =
-        build_cache_profile(&state.cache_tracker, &raw_payload, estimated_input_tokens);
-
-    // 初步计算 cache usage（使用临时 credential_id=0，仅用于日志）
-    let cache_context = compute_cache_usage(&state.cache_tracker, 0, &cache_profile);
-
-    tracing::info!(
-        path = %uri.path(),
-        model = %raw_payload.model,
-        max_tokens = %raw_payload.max_tokens,
-        stream = %raw_payload.stream,
-        message_count = %raw_payload.messages.len(),
-        estimated_input_tokens,
-        cache_creation_input_tokens = cache_context.cache_creation_input_tokens,
-        cache_read_input_tokens = cache_context.cache_read_input_tokens,
-        "Received request"
-    );
-
-    // 本地 WebSearch 也必须遵守 raw payload usage 口径。
-    if websearch::should_handle_websearch_request(&raw_payload) {
-        tracing::info!("检测到纯 WebSearch 请求，路由到本地 WebSearch 处理");
-        return websearch::handle_websearch_request(
-            provider,
-            &raw_payload,
-            estimated_input_tokens,
-            cache_context.into(),
-        )
-        .await;
-    }
-
     // prepared payload 只用于发往 Kiro 的发送链路，后续所有 prepare/strip/convert/compress 均仅作用于此副本。
     let mut prepared_payload = prepared_payload_from_raw(&raw_payload);
 
@@ -1521,6 +1504,39 @@ pub async fn post_messages_cc(
     let stripped = strip_empty_text_content_blocks(&mut prepared_payload.messages);
     if stripped > 0 {
         tracing::info!(stripped, "已剔除空 text content block");
+    }
+
+    // /cc/v1 的 cache profile 需要尽量贴近实际上游缓存前缀，因此基于 prepared payload 构建。
+    let prepared_cache_profile =
+        build_cache_profile(&state.cache_tracker, &prepared_payload, raw_input_tokens(&prepared_payload));
+
+    // 初步计算 cache usage（仅用于入口日志，不能作为最终返回值）
+    let provisional_cache_context =
+        provisional_cache_usage(&state.cache_tracker, &prepared_cache_profile);
+
+    tracing::info!(
+        path = %uri.path(),
+        model = %raw_payload.model,
+        max_tokens = %raw_payload.max_tokens,
+        stream = %raw_payload.stream,
+        message_count = %raw_payload.messages.len(),
+        estimated_input_tokens,
+        provisional_cache_creation_input_tokens = provisional_cache_context.cache_creation_input_tokens,
+        provisional_cache_read_input_tokens = provisional_cache_context.cache_read_input_tokens,
+        "Received request"
+    );
+
+    // 本地 WebSearch 也必须遵守 raw payload usage 口径，但 cache profile 应贴近 MCP 实际请求前缀。
+    if websearch::should_handle_websearch_request(&raw_payload) {
+        tracing::info!("检测到纯 WebSearch 请求，路由到本地 WebSearch 处理");
+        return websearch::handle_websearch_request(
+            provider,
+            &raw_payload,
+            &state.cache_tracker,
+            &prepared_cache_profile,
+            estimated_input_tokens,
+        )
+        .await;
     }
 
     // 转换请求
@@ -1674,11 +1690,11 @@ pub async fn post_messages_cc(
         handle_stream_request_buffered(
             provider,
             &state.cache_tracker,
-            &cache_profile,
+            &prepared_cache_profile,
             &request_body,
             &prepared_payload.model,
             estimated_input_tokens,
-            cache_context,
+            provisional_cache_context,
             thinking_enabled,
             user_id,
         )
@@ -1686,13 +1702,12 @@ pub async fn post_messages_cc(
     } else {
         handle_non_stream_request(
             provider,
-            Some(&state.cache_tracker),
-            Some(&cache_profile),
             &request_body,
             &prepared_payload.model,
             estimated_input_tokens,
             user_id,
-            Some(cache_context),
+            Some(&state.cache_tracker),
+            Some(&prepared_cache_profile),
         )
         .await
     }
@@ -1709,7 +1724,7 @@ async fn handle_stream_request_buffered(
     request_body: &str,
     model: &str,
     estimated_input_tokens: i32,
-    cache_context: CacheUsageContext,
+    _provisional_cache_context: CacheUsageContext,
     thinking_enabled: bool,
     user_id: Option<&str>,
 ) -> Response {
@@ -1719,15 +1734,21 @@ async fn handle_stream_request_buffered(
         Err(e) => return map_kiro_provider_error_to_response(request_body, e),
     };
 
-    // 用真实的 credential_id 更新 cache
+    let final_cache_context = resolved_cache_usage(cache_tracker, api_result.credential_id, cache_profile);
+    tracing::info!(
+        credential_id = api_result.credential_id,
+        final_cache_creation_input_tokens = final_cache_context.cache_creation_input_tokens,
+        final_cache_read_input_tokens = final_cache_context.cache_read_input_tokens,
+        "Resolved cache usage for buffered stream request"
+    );
     cache_tracker.update(api_result.credential_id, cache_profile);
 
     // 创建缓冲流处理上下文
     let ctx = BufferedStreamContext::new(
         model,
         estimated_input_tokens,
-        cache_context.cache_creation_input_tokens,
-        cache_context.cache_read_input_tokens,
+        final_cache_context.cache_creation_input_tokens,
+        final_cache_context.cache_read_input_tokens,
         thinking_enabled,
     );
 
@@ -2039,6 +2060,24 @@ mod tests {
         // 验证 cache_creation_input_tokens 等于 system message 的 token 数
         assert_eq!(cache_context.cache_creation_input_tokens, expected);
         assert_eq!(cache_context.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn test_resolved_cache_usage_uses_real_credential_id() {
+        let raw_payload = sample_messages_request();
+        let estimated = raw_input_tokens(&raw_payload);
+        let cache_tracker =
+            crate::anthropic::cache_tracker::CacheTracker::new(std::time::Duration::from_secs(300));
+        let cache_profile = build_cache_profile(&cache_tracker, &raw_payload, estimated);
+
+        let provisional = provisional_cache_usage(&cache_tracker, &cache_profile);
+        assert_eq!(provisional.cache_read_input_tokens, 0);
+
+        cache_tracker.update(42, &cache_profile);
+        let resolved = resolved_cache_usage(&cache_tracker, 42, &cache_profile);
+
+        assert!(resolved.cache_read_input_tokens > 0);
+        assert!(resolved.cache_creation_input_tokens <= provisional.cache_creation_input_tokens);
     }
 
     #[test]

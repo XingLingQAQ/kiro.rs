@@ -24,6 +24,18 @@ pub struct WebSearchCacheContext {
     pub cache_read_input_tokens: i32,
 }
 
+fn resolve_cache_usage(
+    cache_tracker: &crate::anthropic::cache_tracker::CacheTracker,
+    credential_id: u64,
+    profile: &crate::anthropic::cache_tracker::CacheProfile,
+) -> WebSearchCacheContext {
+    let result = cache_tracker.compute(credential_id, profile);
+    WebSearchCacheContext {
+        cache_creation_input_tokens: result.cache_creation_input_tokens,
+        cache_read_input_tokens: result.cache_read_input_tokens,
+    }
+}
+
 const WEB_SEARCH_PREFIX: &str = "Perform a web search for the query: ";
 
 /// MCP 请求
@@ -599,8 +611,9 @@ fn generate_search_summary(query: &str, results: &Option<WebSearchResults>) -> S
 pub async fn handle_websearch_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     payload: &MessagesRequest,
+    cache_tracker: &crate::anthropic::cache_tracker::CacheTracker,
+    cache_profile: &crate::anthropic::cache_tracker::CacheProfile,
     input_tokens: i32,
-    cache_context: WebSearchCacheContext,
 ) -> Response {
     // 1. 提取搜索查询
     let query = match extract_search_query(payload) {
@@ -623,11 +636,25 @@ pub async fn handle_websearch_request(
     let (tool_use_id, mcp_request) = create_mcp_request(&query);
 
     // 3. 调用 Kiro MCP API
-    let search_results = match call_mcp_api(&provider, &mcp_request).await {
-        Ok(response) => parse_search_results(&response),
+    let (search_results, final_cache_context) = match call_mcp_api(&provider, &mcp_request).await {
+        Ok(api_result) => {
+            let resolved_cache_context =
+                resolve_cache_usage(cache_tracker, api_result.credential_id, cache_profile);
+            tracing::info!(
+                credential_id = api_result.credential_id,
+                final_cache_creation_input_tokens = resolved_cache_context.cache_creation_input_tokens,
+                final_cache_read_input_tokens = resolved_cache_context.cache_read_input_tokens,
+                "Resolved cache usage for websearch request"
+            );
+            cache_tracker.update(api_result.credential_id, cache_profile);
+            (
+                parse_search_results(&api_result.response),
+                resolved_cache_context,
+            )
+        }
         Err(e) => {
             tracing::warn!("MCP API 调用失败: {}", e);
-            None
+            (None, WebSearchCacheContext::default())
         }
     };
 
@@ -640,7 +667,7 @@ pub async fn handle_websearch_request(
             tool_use_id,
             search_results,
             input_tokens,
-            cache_context,
+            final_cache_context,
         );
 
         return Response::builder()
@@ -700,26 +727,31 @@ pub async fn handle_websearch_request(
         "usage": {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "cache_creation_input_tokens": cache_context.cache_creation_input_tokens,
-            "cache_read_input_tokens": cache_context.cache_read_input_tokens
+            "cache_creation_input_tokens": final_cache_context.cache_creation_input_tokens,
+            "cache_read_input_tokens": final_cache_context.cache_read_input_tokens
         }
     });
 
     (StatusCode::OK, Json(response_body)).into_response()
 }
 
+struct ParsedMcpCallResult {
+    response: McpResponse,
+    credential_id: u64,
+}
+
 /// 调用 Kiro MCP API
 async fn call_mcp_api(
     provider: &crate::kiro::provider::KiroProvider,
     request: &McpRequest,
-) -> anyhow::Result<McpResponse> {
+) -> anyhow::Result<ParsedMcpCallResult> {
     let request_body = serde_json::to_string(request)?;
 
     tracing::debug!("MCP request: {}", request_body);
 
-    let response = provider.call_mcp(&request_body).await?;
+    let api_result = provider.call_mcp(&request_body).await?;
 
-    let body = response.text().await?;
+    let body = api_result.response.text().await?;
     tracing::debug!("MCP response: {}", body);
 
     let mcp_response: McpResponse = serde_json::from_str(&body)?;
@@ -732,12 +764,61 @@ async fn call_mcp_api(
         );
     }
 
-    Ok(mcp_response)
+    Ok(ParsedMcpCallResult {
+        response: mcp_response,
+        credential_id: api_result.credential_id,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_cache_usage_uses_real_credential_id() {
+        use crate::anthropic::cache_tracker::CacheTracker;
+        use crate::anthropic::types::{CacheControl, Message, SystemMessage};
+
+        let long_text = "This is a cached websearch system block. ".repeat(100);
+        let payload = MessagesRequest {
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            max_tokens: 1024,
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: serde_json::json!("Perform a web search for the query: rust cache"),
+            }],
+            stream: false,
+            system: Some(vec![SystemMessage {
+                text: format!("{}{}", long_text, long_text),
+                block_type: Some("text".to_string()),
+                cache_control: Some(CacheControl {
+                    cache_type: "ephemeral".to_string(),
+                    ttl: None,
+                }),
+            }]),
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        };
+
+        let tracker = CacheTracker::new(std::time::Duration::from_secs(300));
+        let total = crate::token::count_all_tokens(
+            payload.model.clone(),
+            payload.system.clone(),
+            payload.messages.clone(),
+            payload.tools.clone(),
+        ) as i32;
+        let profile = tracker.build_profile(&payload, total);
+
+        let initial = resolve_cache_usage(&tracker, 7, &profile);
+        assert_eq!(initial.cache_read_input_tokens, 0);
+
+        tracker.update(7, &profile);
+        let resolved = resolve_cache_usage(&tracker, 7, &profile);
+        assert!(resolved.cache_read_input_tokens > 0);
+    }
 
     #[test]
     fn test_generate_websearch_events_uses_raw_usage_and_cache_context() {

@@ -26,6 +26,12 @@ pub struct ApiCallResult {
     pub credential_id: u64,
 }
 
+/// MCP 调用结果
+pub struct McpCallResult {
+    pub response: reqwest::Response,
+    pub credential_id: u64,
+}
+
 /// 每个凭据的最大重试次数
 const MAX_RETRIES_PER_CREDENTIAL: usize = 2;
 
@@ -332,13 +338,13 @@ impl KiroProvider {
     /// * `request_body` - JSON 格式的 MCP 请求体字符串
     ///
     /// # Returns
-    /// 返回原始的 HTTP Response
-    pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+    /// 返回原始的 HTTP Response 以及实际使用的 credential_id
+    pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<McpCallResult> {
         self.call_mcp_with_retry(request_body).await
     }
 
     /// 内部方法：带重试逻辑的 MCP API 调用
-    async fn call_mcp_with_retry(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+    async fn call_mcp_with_retry(&self, request_body: &str) -> anyhow::Result<McpCallResult> {
         let total_credentials = self.token_manager.total_count();
         let available = self.token_manager.available_count();
         if available == 0 {
@@ -402,7 +408,10 @@ impl KiroProvider {
             // 成功响应
             if status.is_success() {
                 self.token_manager.report_success(ctx.id);
-                return Ok(response);
+                return Ok(McpCallResult {
+                    response,
+                    credential_id: ctx.id,
+                });
             }
 
             // 失败响应
