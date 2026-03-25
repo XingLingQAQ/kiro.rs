@@ -49,7 +49,6 @@
   - [环境变量](#环境变量)
 - [API 端点](#api-端点)
   - [标准端点 (/v1)](#标准端点-v1)
-  - [Claude Code 兼容端点 (/cc/v1)](#claude-code-兼容端点-ccv1)
   - [Thinking 模式](#thinking-模式)
   - [工具调用](#工具调用)
 - [模型映射](#模型映射)
@@ -115,9 +114,21 @@ IdC 认证：
 
 ### 3. 启动
 
+生产/嵌入式 Admin UI：
+
 ```bash
 ./target/release/kiro-rs
 ```
+
+开发模式（推荐调试 Admin UI 时使用）：
+
+```bash
+make dev
+```
+
+- 前端开发地址：`http://localhost:5173/admin/`
+- 前端 `/api` 请求会通过 Vite 代理到：`http://localhost:8990`
+- 后端直连地址：`http://localhost:8990/admin`
 
 或指定配置文件路径：
 
@@ -359,18 +370,6 @@ RUST_LOG=debug ./target/release/kiro-rs
 | `/v1/models` | GET | 获取可用模型列表 |
 | `/v1/messages` | POST | 创建消息（对话） |
 | `/v1/messages/count_tokens` | POST | 估算 Token 数量 |
-
-### Claude Code 兼容端点 (/cc/v1)
-
-| 端点 | 方法 | 描述 |
-|------|------|------|
-| `/cc/v1/messages` | POST | 创建消息（缓冲模式，确保 `input_tokens` 准确） |
-| `/cc/v1/messages/count_tokens` | POST | 估算 Token 数量（与 `/v1` 相同） |
-
-> **`/cc/v1/messages` 与 `/v1/messages` 的区别**：
-> - `/v1/messages`：实时流式返回，`message_start` 中的 `input_tokens` 是估算值
-> - `/cc/v1/messages`：缓冲模式，等待上游流完成后，用从 `contextUsageEvent` 计算的准确 `input_tokens` 更正 `message_start`，然后一次性返回所有事件
-> - 等待期间会每 25 秒发送 `ping` 事件保活
 
 ### Thinking 模式
 

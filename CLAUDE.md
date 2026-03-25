@@ -65,7 +65,7 @@ POST /v1/messages (Anthropic 格式)
 2. **Multi-Token Manager** - `kiro/token_manager.rs`: 多凭据管理，按优先级故障转移，后台异步刷新 Token（支持 Social 和 IdC 两种认证方式）。余额缓存动态 TTL：高频用户 10 分钟、低频用户 30 分钟、低余额用户 24 小时，过期时异步刷新不阻塞请求
 3. **Protocol Converter** - `anthropic/converter.rs`: Anthropic ↔ Kiro 双向协议转换，包括模型映射（sonnet/opus/haiku → Kiro 模型 ID）、JSON Schema 规范化（修复 MCP 工具的 `required: null` / `properties: null`）、工具占位符生成、图片格式转换
 4. **Event Stream Parser** - `kiro/parser/`: AWS Event Stream 二进制协议解析（header + payload + CRC32C 校验）
-5. **Buffered Stream** - `anthropic/stream.rs`: 两种流模式 — `StreamContext`（直接转发）和 `BufferedStreamContext`（缓冲所有事件，等 `contextUsageEvent` 到达后修正 input_tokens 再一次性发送）
+5. **Streaming Response** - `anthropic/stream.rs`: 使用 `StreamContext` 实时将 Kiro 事件转换为 Anthropic SSE，最终 usage 采用本地估算口径并透传上游 `meteringEvent` 诊断信息
 6. **Input Compressor** - `anthropic/compressor.rs`: 多层压缩管道（空白压缩 → thinking 截断 → tool_result 截断 → tool_use input 截断 → 历史截断），自动修复 tool_use/tool_result 配对以避免上游 400 错误
 7. **Image Processor** - `image.rs`: 图片处理（缩放、GIF 抽帧、token 计算）。GIF 抽帧策略：最多 20 帧、最多 5fps、按时长自适应采样间隔，输出为 JPEG 静态帧序列
 
@@ -95,7 +95,6 @@ AppState {
 - `GET /v1/models` - 获取可用模型列表
 - `POST /v1/messages` - 创建消息（Anthropic 格式）
 - `POST /v1/messages/count_tokens` - Token 计数
-- `/cc/v1/*` - Claude Code 优化 API（其中 messages 走专用流式优化逻辑，models/count_tokens 与 `/v1` 对齐）
 
 **Admin API** (需配置 `adminApiKey`):
 - 凭据 CRUD、状态监控、余额查询

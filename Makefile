@@ -38,6 +38,7 @@ ui-dev:
 dev:
 	@echo "启动开发模式：前端 dev server + Rust 后端"
 	@echo "前端访问地址请使用: http://localhost:5173/admin/"
+	@echo "前端 /api 请求会代理到: http://localhost:8990"
 	@cd admin-ui && pnpm install && pnpm dev & \
 	cargo run --features sensitive-logs -- -c config/config.json --credentials config/credentials.json
 

@@ -385,7 +385,7 @@ fn generate_websearch_events(
         billed_input_tokens(input_tokens, cache_context.cache_read_input_tokens);
 
     // 1. message_start
-    // /cc/v1 本地 WebSearch 的 usage 必须沿用外层基于 raw payload 预先计算的统计口径。
+    // 本地 WebSearch 的 usage 需要沿用外层预先计算的统计口径。
     events.push(SseEvent::new(
         "message_start",
         json!({

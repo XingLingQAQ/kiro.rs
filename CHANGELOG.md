@@ -3,26 +3,25 @@
 ## [Unreleased]
 
 ### Added
-- **Claude Code 优化 API 暴露 models 入口** — 新增 `GET /cc/v1/models`，复用现有模型列表实现并补全启动日志，明确 `/cc/v1/*` 为 Claude Code 优化 API，便于客户端发现可用接口 (`src/anthropic/router.rs`, `src/anthropic/handlers.rs`, `src/anthropic/mod.rs`, `src/main.rs`, `CLAUDE.md`)
 
 ### Changed
-- **请求访问日志统一输出实际路径** — `/v1` 与 `/cc/v1` 的 `models`、`messages`、`count_tokens` 日志统一输出 `path` 字段并使用一致消息名，便于日志检索与区分实际访问接口 (`src/anthropic/handlers.rs`)
+- **请求访问日志统一输出实际路径** — `/v1` 的 `models`、`messages`、`count_tokens` 日志统一输出 `path` 字段并使用一致消息名，便于日志检索与区分实际访问接口 (`src/anthropic/handlers.rs`)
 
 ### Added
-- **Prompt Cache 本地命中追踪** — 新增 `cache_tracker` 模块，本地按请求内容和凭据维度模拟 Prompt Caching 命中，修复 `/cc/v1/messages` 连续对话中 `cache_read_input_tokens` 长期为 0 的问题；同时让 `KiroProvider` 返回实际命中的 `credential_id`，在成功请求后更新缓存状态 (`src/anthropic/cache_tracker.rs`, `src/anthropic/handlers.rs`, `src/kiro/provider.rs`, `src/token.rs`)
+- **Prompt Cache 本地命中追踪** — 新增 `cache_tracker` 模块，本地按请求内容和凭据维度模拟 Prompt Caching 命中，并让 `KiroProvider` 返回实际命中的 `credential_id`，在成功请求后更新缓存状态 (`src/anthropic/cache_tracker.rs`, `src/anthropic/handlers.rs`, `src/kiro/provider.rs`, `src/token.rs`)
 - **Prompt Cache TTL 配置化** — 新增 `promptCacheTtlSeconds` 配置项，替代原先 300 秒硬编码，支持通过配置文件调整本地 Prompt Cache 的 TTL (`src/model/config.rs`, `src/anthropic/middleware.rs`, `src/anthropic/router.rs`, `src/main.rs`, `config.example.json`)
 
 ### Changed
 - **Anthropic 类型补齐 cache_control 字段** — 为 `SystemMessage` 和 `Tool` 增加 `cache_control` 支持，并同步修正相关测试构造，确保缓存标记可以进入本地追踪逻辑 (`src/anthropic/types.rs`, `src/anthropic/converter.rs`, `src/anthropic/websearch.rs`, `src/anthropic/handlers.rs`)
 
 ### Added
-- **Kiro credit usage 透传** — 新增 `meteringEvent` 真实 payload 解析模型，并在流式 `/v1`、缓冲流式 `/cc/v1` 与非流式响应的 `usage` / `message_delta.usage` 中透传 `credit_usage`、`credit_unit`、`credit_unit_plural`，同时保持现有 `input_tokens` 与 `cache_*` 本地兼容语义不变 (`src/kiro/model/events/metering.rs`, `src/kiro/model/events/base.rs`, `src/kiro/model/events/mod.rs`, `src/anthropic/stream.rs`, `src/anthropic/handlers.rs`)
-- **credit usage 回填回归测试** — 补充 `meteringEvent` 解析、流式 `message_delta.usage`、`/cc/v1` cache 与 credit 共存、非流式 usage 注入等单测，锁定透传行为 (`src/kiro/model/events/base.rs`, `src/anthropic/stream.rs`, `src/anthropic/handlers.rs`)
+- **Kiro credit usage 透传** — 新增 `meteringEvent` 真实 payload 解析模型，并在流式 `/v1` 与非流式响应的 `usage` / `message_delta.usage` 中透传 `credit_usage`、`credit_unit`、`credit_unit_plural`，同时保持现有 `input_tokens` 与 `cache_*` 本地兼容语义不变 (`src/kiro/model/events/metering.rs`, `src/kiro/model/events/base.rs`, `src/kiro/model/events/mod.rs`, `src/anthropic/stream.rs`, `src/anthropic/handlers.rs`)
+- **credit usage 回填回归测试** — 补充 `meteringEvent` 解析、流式 `message_delta.usage` 与非流式 usage 注入等单测，锁定透传行为 (`src/kiro/model/events/base.rs`, `src/anthropic/stream.rs`, `src/anthropic/handlers.rs`)
 
 ## [v1.1.12] - 2026-03-17
 
 ### Fixed
-- **Usage 信息始终返回估算值** — `StreamContext` 和 `BufferedStreamContext` 的 `final_input_tokens` 改为始终使用本地估算值（`input_tokens` / `estimated_input_tokens`），不再使用上游 `contextUsageEvent` 计算的值；避免因服务端压缩导致返回的 token 数偏低，使客户端（如 Claude Code）误判上下文大小并重复触发压缩；`context_input_tokens` 仍保留用于日志记录和 `context_usage_percentage >= 100%` 判断 (`src/anthropic/stream.rs`)
+- **Usage 信息始终返回估算值** — `StreamContext` 的 `final_input_tokens` 改为始终使用本地估算值（`input_tokens`），不再使用上游 `contextUsageEvent` 计算的值；避免因服务端压缩导致返回的 token 数偏低，使客户端误判上下文大小并重复触发压缩；`context_input_tokens` 仍保留用于日志记录和 `context_usage_percentage >= 100%` 判断 (`src/anthropic/stream.rs`)
 
 ## [v1.1.11] - 2026-03-15
 
@@ -258,7 +257,7 @@
 - **自适应二次压缩策略** (`src/anthropic/handlers.rs`)
   - 请求体超过 `max_request_body_bytes` 阈值时，自动迭代压缩：逐步降低 tool_result/tool_use_input 截断阈值，最后按轮移除最老历史消息
   - 最多迭代 32 轮，避免极端输入导致过长 CPU 消耗
-  - `post_messages` 和 `post_messages_cc` 均支持自适应压缩
+  - `post_messages` 支持自适应压缩
 - **压缩后 tool_use/tool_result 配对修复** (`src/anthropic/compressor.rs`)
   - 新增 `repair_tool_pairing_pass()`：历史截断后自动移除孤立的 tool_use 和 tool_result
   - 解决截断破坏跨消息 tool_use→tool_result 配对导致 upstream 返回 400 "Improperly formed request" 的问题
@@ -396,7 +395,7 @@
 ### Changed
 - **请求日志输出压缩前后 token 估算** (`src/anthropic/converter.rs`, `src/anthropic/handlers.rs`)
   - `ConversionResult` 新增 `compression_stats` 字段，将压缩统计从 converter 内部返回给调用方
-  - `post_messages` / `post_messages_cc` 在 `convert_request()` 之前估算 input tokens，`Received` 日志追加 `estimated_input_tokens`
+  - `post_messages` 在 `convert_request()` 之前估算 input tokens，`Received` 日志追加 `estimated_input_tokens`
   - 压缩完成后输出 token 对比日志：`estimated_input_tokens`、`compressed_input_tokens`、`tokens_saved` 及各项压缩明细
   - WebSearch 分支复用已有估算值，消除重复的 `count_all_tokens` 调用
 - **`count_all_tokens` 改为接受借用** (`src/token.rs`)
@@ -657,7 +656,6 @@
   - Kiro API 要求 tool_use 必须有配对的 tool_result，否则返回 400 Bad Request
   - 新增 `remove_orphaned_tool_uses()` 函数清理孤立的 tool_use
   - 涉及文件：`src/anthropic/converter.rs`
-- 修复 `/cc/v1/messages` 缓冲流 ping 定时器首次立即触发的问题
   - 将 `interval()` 改为 `interval_at(Instant::now() + ping_period, ping_period)`
   - 现在首个 ping 会在 25 秒后触发，与 `/v1/messages` 行为一致
   - 涉及文件：`src/anthropic/handlers.rs`

@@ -200,10 +200,6 @@ async fn main() {
     tracing::info!("  GET  /v1/models");
     tracing::info!("  POST /v1/messages");
     tracing::info!("  POST /v1/messages/count_tokens");
-    tracing::info!("Claude Code 优化 API:");
-    tracing::info!("  GET  /cc/v1/models");
-    tracing::info!("  POST /cc/v1/messages");
-    tracing::info!("  POST /cc/v1/messages/count_tokens");
     if admin_key_valid {
         tracing::info!("Admin API:");
         tracing::info!("  GET  /api/admin/credentials");

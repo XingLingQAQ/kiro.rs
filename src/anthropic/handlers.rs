@@ -34,7 +34,7 @@ const ADAPTIVE_MIN_MESSAGE_CONTENT_MAX_CHARS: usize = 8192;
 
 use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
-use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
+use super::stream::{SseEvent, StreamContext};
 use super::types::{
     CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse,
     OutputConfig, Thinking,
@@ -82,15 +82,6 @@ fn resolved_cache_usage(
     compute_cache_usage(cache_tracker, credential_id, profile)
 }
 
-fn raw_input_tokens(payload: &MessagesRequest) -> i32 {
-    token::count_all_tokens(
-        payload.model.clone(),
-        payload.system.clone(),
-        payload.messages.clone(),
-        payload.tools.clone(),
-    ) as i32
-}
-
 fn inject_cache_usage_fields(usage: &mut serde_json::Value, cache_context: CacheUsageContext) {
     usage["cache_creation_input_tokens"] = json!(cache_context.cache_creation_input_tokens);
     usage["cache_read_input_tokens"] = json!(cache_context.cache_read_input_tokens);
@@ -104,19 +95,6 @@ fn inject_credit_usage_fields(usage: &mut serde_json::Value, metering: &Metering
     usage["credit_usage"] = json!(metering.usage);
     usage["credit_unit"] = json!(metering.unit);
     usage["credit_unit_plural"] = json!(metering.unit_plural);
-}
-
-fn prepared_payload_from_raw(raw_payload: &MessagesRequest) -> MessagesRequest {
-    let mut prepared_payload = raw_payload.clone();
-    override_thinking_from_model_name(&mut prepared_payload);
-    prepared_payload
-}
-
-fn strip_web_search_tools_if_needed(payload: &mut MessagesRequest) {
-    if websearch::has_web_search_tool(payload) {
-        tracing::info!("检测到混合工具列表中的 web_search，剔除后转发上游");
-        websearch::strip_web_search_tools(payload);
-    }
 }
 
 fn is_input_too_long_error(err: &Error) -> bool {
@@ -552,10 +530,9 @@ fn strip_empty_text_content_blocks(messages: &mut [super::types::Message]) -> us
     removed
 }
 
-/// GET /v1/models, GET /cc/v1/models
+/// GET /v1/models
 ///
 /// 返回可用的模型列表。
-/// 其中 `/cc/v1/models` 用于 Claude Code 优化 API，响应内容与 `/v1/models` 保持一致。
 pub async fn get_models(OriginalUri(uri): OriginalUri) -> impl IntoResponse {
     tracing::info!(
         path = %uri.path(),
@@ -1455,10 +1432,9 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
     }
 }
 
-/// POST /v1/messages/count_tokens, POST /cc/v1/messages/count_tokens
+/// POST /v1/messages/count_tokens
 ///
 /// 计算消息的 token 数量。
-/// 其中 `/cc/v1/messages/count_tokens` 用于 Claude Code 优化 API，计算逻辑与 `/v1/messages/count_tokens` 保持一致。
 pub async fn count_tokens(
     OriginalUri(uri): OriginalUri,
     JsonExtractor(payload): JsonExtractor<CountTokensRequest>,
@@ -1480,405 +1456,6 @@ pub async fn count_tokens(
     Json(CountTokensResponse {
         input_tokens: total_tokens.max(1) as i32,
     })
-}
-
-/// POST /cc/v1/messages
-///
-/// Claude Code 优化 API，与 /v1/messages 的区别在于：
-/// - 流式响应会等待 kiro 端返回 contextUsageEvent 后再发送 message_start
-/// - message_start 中的 input_tokens 是从 contextUsageEvent 计算的准确值
-pub async fn post_messages_cc(
-    OriginalUri(uri): OriginalUri,
-    State(state): State<AppState>,
-    JsonExtractor(raw_payload): JsonExtractor<MessagesRequest>,
-) -> Response {
-    // 读取压缩配置快照（读锁 + clone，避免持锁跨 await）
-    let compression_config = state.compression_config.read().clone();
-
-    // 检查 KiroProvider 是否可用
-    let provider = match &state.kiro_provider {
-        Some(p) => p.clone(),
-        None => {
-            tracing::error!("KiroProvider 未配置");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse::new(
-                    "service_unavailable",
-                    "Kiro API provider not configured",
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    // raw payload 只用于 /cc/v1 兼容统计，绝不能被 prepare/strip/normalize/compress 污染。
-    let estimated_input_tokens = raw_input_tokens(&raw_payload);
-
-    // prepared payload 只用于发往 Kiro 的发送链路，后续所有 prepare/strip/convert/compress 均仅作用于此副本。
-    let mut prepared_payload = prepared_payload_from_raw(&raw_payload);
-
-    strip_web_search_tools_if_needed(&mut prepared_payload);
-
-    // 剔除空 text content block（客户端可能将 tool_use-only 响应中的空 text block 写回 history）
-    let stripped = strip_empty_text_content_blocks(&mut prepared_payload.messages);
-    if stripped > 0 {
-        tracing::info!(stripped, "已剔除空 text content block");
-    }
-
-    // /cc/v1 的 cache profile 需要尽量贴近实际上游缓存前缀，因此基于 prepared payload 构建。
-    let prepared_cache_profile = build_cache_profile(
-        &state.cache_tracker,
-        &prepared_payload,
-        raw_input_tokens(&prepared_payload),
-    );
-
-    // 初步计算 cache usage（仅用于入口日志，不能作为最终返回值）
-    let provisional_cache_context =
-        provisional_cache_usage(&state.cache_tracker, &prepared_cache_profile);
-
-    tracing::info!(
-        path = %uri.path(),
-        model = %raw_payload.model,
-        max_tokens = %raw_payload.max_tokens,
-        stream = %raw_payload.stream,
-        message_count = %raw_payload.messages.len(),
-        estimated_input_tokens,
-        provisional_cache_creation_input_tokens = provisional_cache_context.cache_creation_input_tokens,
-        provisional_cache_read_input_tokens = provisional_cache_context.cache_read_input_tokens,
-        "Received request"
-    );
-
-    // 本地 WebSearch 也必须遵守 raw payload usage 口径，但 cache profile 应贴近 MCP 实际请求前缀。
-    if websearch::should_handle_websearch_request(&raw_payload) {
-        tracing::info!("检测到纯 WebSearch 请求，路由到本地 WebSearch 处理");
-        return websearch::handle_websearch_request(
-            provider,
-            &raw_payload,
-            &state.cache_tracker,
-            &prepared_cache_profile,
-            estimated_input_tokens,
-        )
-        .await;
-    }
-
-    // 转换请求
-    let conversion_result = match convert_request(&prepared_payload, &compression_config) {
-        Ok(result) => result,
-        Err(e) => {
-            let (error_type, message) = match &e {
-                ConversionError::UnsupportedModel(model) => {
-                    ("invalid_request_error", format!("模型不支持: {}", model))
-                }
-                ConversionError::EmptyMessages => {
-                    ("invalid_request_error", "消息列表为空".to_string())
-                }
-                ConversionError::EmptyMessageContent => {
-                    ("invalid_request_error", "消息内容为空".to_string())
-                }
-            };
-            tracing::warn!("请求转换失败: {}", e);
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(error_type, message)),
-            )
-                .into_response();
-        }
-    };
-
-    // 输出压缩统计（以字节为单位；用于排查上游请求体大小限制，实测约 5MiB 左右会触发 400）
-    if let Some(ref stats) = conversion_result.compression_stats {
-        tracing::info!(
-            estimated_input_tokens,
-            bytes_saved_total = stats.total_saved(),
-            whitespace_bytes_saved = stats.whitespace_saved,
-            thinking_bytes_saved = stats.thinking_saved,
-            tool_result_bytes_saved = stats.tool_result_saved,
-            tool_use_input_bytes_saved = stats.tool_use_input_saved,
-            history_turns_removed = stats.history_turns_removed,
-            history_bytes_saved = stats.history_bytes_saved,
-            "输入压缩完成"
-        );
-    }
-
-    // 构建 Kiro 请求
-    let mut kiro_request = KiroRequest {
-        conversation_state: conversion_result.conversation_state,
-        profile_arn: state.profile_arn.clone(),
-    };
-
-    let mut request_body = match serde_json::to_string(&kiro_request) {
-        Ok(body) => body,
-        Err(e) => {
-            tracing::error!("序列化请求失败: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(
-                    "internal_error",
-                    format!("序列化请求失败: {}", e),
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    // 请求体大小预检（上游存在硬性请求体大小限制；按实际序列化后的总字节数判断）
-    let max_body = compression_config.max_request_body_bytes;
-    if max_body > 0 && request_body.len() > max_body && compression_config.enabled {
-        // 自适应二次压缩：仅压缩发往上游的 KiroRequest，不回流影响 /cc/v1 本地 usage/cache 统计。
-        match adaptive_shrink_request_body(
-            &mut kiro_request,
-            &compression_config,
-            max_body,
-            &mut request_body,
-        ) {
-            Ok(Some(outcome)) => {
-                tracing::warn!(
-                    conversation_id = kiro_request.conversation_state.conversation_id.as_str(),
-                    initial_bytes = outcome.initial_bytes,
-                    final_bytes = outcome.final_bytes,
-                    threshold = max_body,
-                    iters = outcome.iters,
-                    additional_history_turns_removed = outcome.additional_history_turns_removed,
-                    final_tool_result_max_chars = outcome.final_tool_result_max_chars,
-                    final_tool_use_input_max_chars = outcome.final_tool_use_input_max_chars,
-                    final_message_content_max_chars = outcome.final_message_content_max_chars,
-                    "请求体超过阈值，已执行自适应二次压缩"
-                );
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::error!("自适应二次压缩序列化失败: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new(
-                        "internal_error",
-                        format!("序列化请求失败: {}", e),
-                    )),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    // 压缩后再次检查（输出 image_bytes/non-image bytes 便于排查）
-    let final_img_bytes = total_image_bytes(&kiro_request);
-    let final_effective_len = request_body.len().saturating_sub(final_img_bytes);
-    if max_body > 0 && request_body.len() > max_body {
-        tracing::warn!(
-            conversation_id = kiro_request.conversation_state.conversation_id.as_str(),
-            request_body_bytes = request_body.len(),
-            image_bytes = final_img_bytes,
-            effective_bytes = final_effective_len,
-            threshold = max_body,
-            "请求体超过安全阈值，拒绝发送"
-        );
-        #[cfg(feature = "sensitive-logs")]
-        tracing::error!(
-            "自适应压缩仍超限，完整请求体（用于诊断）: {}",
-            truncate_base64_in_request_body(&request_body)
-        );
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "invalid_request_error",
-                format!(
-                    "Request too large ({} bytes total; images {} bytes; non-image {} bytes; limit {}). Reduce conversation history/tool output or number/size of images.",
-                    request_body.len(),
-                    final_img_bytes,
-                    final_effective_len,
-                    max_body
-                ),
-            )),
-        )
-            .into_response();
-    }
-
-    tracing::debug!(
-        kiro_request_body_bytes = request_body.len(),
-        "已构建 Kiro 请求体"
-    );
-
-    let thinking_enabled = prepared_payload
-        .thinking
-        .as_ref()
-        .map(|t| t.is_enabled())
-        .unwrap_or(false);
-    let user_id = prepared_payload
-        .metadata
-        .as_ref()
-        .and_then(|m| m.user_id.as_deref());
-
-    if prepared_payload.stream {
-        handle_stream_request_buffered(
-            provider,
-            &state.cache_tracker,
-            &prepared_cache_profile,
-            &request_body,
-            &prepared_payload.model,
-            estimated_input_tokens,
-            provisional_cache_context,
-            thinking_enabled,
-            user_id,
-        )
-        .await
-    } else {
-        handle_non_stream_request(
-            provider,
-            &request_body,
-            &prepared_payload.model,
-            estimated_input_tokens,
-            user_id,
-            Some(&state.cache_tracker),
-            Some(&prepared_cache_profile),
-        )
-        .await
-    }
-}
-
-/// 处理流式请求（缓冲版本）
-///
-/// 与 `handle_stream_request` 不同，此函数会缓冲所有事件直到流结束，
-/// 然后用从 contextUsageEvent 计算的正确 input_tokens 生成 message_start 事件。
-async fn handle_stream_request_buffered(
-    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
-    cache_tracker: &std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>,
-    cache_profile: &crate::anthropic::cache_tracker::CacheProfile,
-    request_body: &str,
-    model: &str,
-    estimated_input_tokens: i32,
-    _provisional_cache_context: CacheUsageContext,
-    thinking_enabled: bool,
-    user_id: Option<&str>,
-) -> Response {
-    // 调用 Kiro API（支持多凭据故障转移）
-    let api_result = match provider.call_api_stream(request_body, user_id).await {
-        Ok(resp) => resp,
-        Err(e) => return map_kiro_provider_error_to_response(request_body, e),
-    };
-
-    let final_cache_context =
-        resolved_cache_usage(cache_tracker, api_result.credential_id, cache_profile);
-    tracing::info!(
-        credential_id = api_result.credential_id,
-        final_cache_creation_input_tokens = final_cache_context.cache_creation_input_tokens,
-        final_cache_read_input_tokens = final_cache_context.cache_read_input_tokens,
-        "Resolved cache usage for buffered stream request"
-    );
-    cache_tracker.update(api_result.credential_id, cache_profile);
-
-    // 创建缓冲流处理上下文
-    let ctx = BufferedStreamContext::new(
-        model,
-        estimated_input_tokens,
-        final_cache_context.cache_creation_input_tokens,
-        final_cache_context.cache_read_input_tokens,
-        thinking_enabled,
-    );
-
-    // 创建缓冲 SSE 流
-    let stream = create_buffered_sse_stream(api_result.response, ctx);
-
-    // 返回 SSE 响应
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header(header::CONNECTION, "keep-alive")
-        .body(Body::from_stream(stream))
-        .unwrap()
-}
-
-/// 创建缓冲 SSE 事件流
-///
-/// 工作流程：
-/// 1. 等待上游流完成，期间只发送 ping 保活信号
-/// 2. 使用 StreamContext 的事件处理逻辑处理所有 Kiro 事件，结果缓存
-/// 3. 流结束后，用正确的 input_tokens 更正 message_start 事件
-/// 4. 一次性发送所有事件
-fn create_buffered_sse_stream(
-    response: reqwest::Response,
-    ctx: BufferedStreamContext,
-) -> impl Stream<Item = Result<Bytes, Infallible>> {
-    let body_stream = response.bytes_stream();
-    let ping_period = Duration::from_secs(PING_INTERVAL_SECS);
-    let ping_interval = interval_at(Instant::now() + ping_period, ping_period);
-
-    stream::unfold(
-        (
-            body_stream,
-            ctx,
-            EventStreamDecoder::new(),
-            false,
-            ping_interval,
-        ),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
-            if finished {
-                return None;
-            }
-
-            loop {
-                tokio::select! {
-                    // 使用 biased 模式，优先检查 ping 定时器
-                    // 避免在上游 chunk 密集时 ping 被"饿死"
-                    biased;
-
-                    // 优先检查 ping 保活（等待期间唯一发送的数据）
-                    _ = ping_interval.tick() => {
-                        tracing::trace!("发送 ping 保活事件（缓冲模式）");
-                        let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                        return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)));
-                    }
-
-                    // 然后处理数据流
-                    chunk_result = body_stream.next() => {
-                        match chunk_result {
-                            Some(Ok(chunk)) => {
-                                // 解码事件
-                                if let Err(e) = decoder.feed(&chunk) {
-                                    tracing::warn!("缓冲区溢出: {}", e);
-                                }
-
-                                for result in decoder.decode_iter() {
-                                    match result {
-                                        Ok(frame) => {
-                                            if let Ok(event) = Event::from_frame(frame) {
-                                                // 缓冲事件（复用 StreamContext 的处理逻辑）
-                                                ctx.process_and_buffer(&event);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("解码事件失败: {}", e);
-                                        }
-                                    }
-                                }
-                                // 继续读取下一个 chunk，不发送任何数据
-                            }
-                            Some(Err(e)) => {
-                                tracing::error!("读取响应流失败: {}", e);
-                                // 发生错误，完成处理并返回所有事件
-                                let all_events = ctx.finish_and_get_all_events();
-                                let bytes: Vec<Result<Bytes, Infallible>> = all_events
-                                    .into_iter()
-                                    .map(|e| Ok(Bytes::from(e.to_sse_string())))
-                                    .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
-                            }
-                            None => {
-                                // 流结束，完成处理并返回所有事件（已更正 input_tokens）
-                                let all_events = ctx.finish_and_get_all_events();
-                                let bytes: Vec<Result<Bytes, Infallible>> = all_events
-                                    .into_iter()
-                                    .map(|e| Ok(Bytes::from(e.to_sse_string())))
-                                    .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
-                            }
-                        }
-                    }
-                }
-            }
-        },
-    )
-    .flatten()
 }
 
 /// 截断字符串中间部分，保留头尾各 `keep` 个字符
@@ -2036,48 +1613,17 @@ mod tests {
     }
 
     #[test]
-    fn test_raw_usage_does_not_follow_prepared_payload() {
-        let raw_payload = sample_messages_request();
-        let raw_tokens = raw_input_tokens(&raw_payload);
-
-        let mut prepared_payload = prepared_payload_from_raw(&raw_payload);
-        strip_web_search_tools_if_needed(&mut prepared_payload);
-        let stripped = strip_empty_text_content_blocks(&mut prepared_payload.messages);
-
-        assert!(
-            stripped > 0,
-            "prepared payload should strip empty text blocks"
-        );
-        assert!(
-            prepared_payload
-                .tools
-                .as_ref()
-                .is_none_or(|tools| tools.is_empty())
-        );
-        assert!(
-            prepared_payload.thinking.is_some(),
-            "prepared payload should override thinking"
-        );
-
-        let prepared_tokens = raw_input_tokens(&prepared_payload);
-        assert_ne!(
-            raw_tokens, prepared_tokens,
-            "raw/prepared token counts should diverge"
-        );
-    }
-
-    #[test]
     fn test_cache_context_uses_raw_system_tokens() {
-        let raw_payload = sample_messages_request();
+        let payload = sample_messages_request();
 
         let cache_tracker =
             crate::anthropic::cache_tracker::CacheTracker::new(std::time::Duration::from_secs(300));
 
         // 计算实际的 system message tokens
-        let system_text = &raw_payload.system.as_ref().unwrap()[0].text;
+        let system_text = &payload.system.as_ref().unwrap()[0].text;
         let expected = token::count_tokens(system_text) as i32;
 
-        let cache_profile = build_cache_profile(&cache_tracker, &raw_payload, expected);
+        let cache_profile = build_cache_profile(&cache_tracker, &payload, expected);
         let cache_context = compute_cache_usage(&cache_tracker, 0, &cache_profile);
 
         // 验证 cache_creation_input_tokens 等于 system message 的 token 数
@@ -2087,11 +1633,16 @@ mod tests {
 
     #[test]
     fn test_resolved_cache_usage_uses_real_credential_id() {
-        let raw_payload = sample_messages_request();
-        let estimated = raw_input_tokens(&raw_payload);
+        let payload = sample_messages_request();
+        let estimated = token::count_all_tokens(
+            payload.model.clone(),
+            payload.system.clone(),
+            payload.messages.clone(),
+            payload.tools.clone(),
+        ) as i32;
         let cache_tracker =
             crate::anthropic::cache_tracker::CacheTracker::new(std::time::Duration::from_secs(300));
-        let cache_profile = build_cache_profile(&cache_tracker, &raw_payload, estimated);
+        let cache_profile = build_cache_profile(&cache_tracker, &payload, estimated);
 
         let provisional = provisional_cache_usage(&cache_tracker, &cache_profile);
         assert_eq!(provisional.cache_read_input_tokens, 0);
