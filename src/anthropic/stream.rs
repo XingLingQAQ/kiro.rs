@@ -1164,7 +1164,9 @@ impl BufferedStreamContext {
         // 避免 prepare/压缩/上游注入提示词污染 /cc/v1 兼容统计。
         // credit usage 仅透传上游 meteringEvent，不覆盖本地 raw input/cache usage。
         let final_input_tokens = self.estimated_input_tokens;
-        let billed_input_tokens = final_input_tokens.saturating_sub(self.cache_read_input_tokens).max(0);
+        let billed_input_tokens = final_input_tokens
+            .saturating_sub(self.cache_read_input_tokens)
+            .max(0);
 
         #[cfg(feature = "sensitive-logs")]
         tracing::info!(

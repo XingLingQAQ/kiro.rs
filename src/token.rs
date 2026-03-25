@@ -1,11 +1,12 @@
 //! Token 计算模块
 //!
-//! 提供文本 token 数量计算功能。
+//! 提供本地 token 数量估算与远程 count_tokens 回退逻辑。
 //!
-//! # 计算规则
-//! - 非西文字符：每个计 4.5 个字符单位
-//! - 西文字符：每个计 1 个字符单位
-//! - 4 个字符单位 = 1 token（四舍五入）
+//! # 本地估算规则
+//! - CJK 字符：约 1.5 字符/token
+//! - 其他非空白字符：约 3.5 字符/token
+//! - 忽略空白字符
+//! - 最终四舍五入
 
 use crate::anthropic::types::{
     CountTokensRequest, CountTokensResponse, Message, SystemMessage, Tool,
@@ -14,6 +15,9 @@ use crate::http_client::{ProxyConfig, build_client};
 use crate::model::config::TlsBackend;
 use parking_lot::RwLock;
 use std::sync::OnceLock;
+
+const TOKENS_PER_TOOL: u64 = 150;
+const TOKENS_PER_MESSAGE: u64 = 4;
 
 /// Count Tokens API 配置
 #[derive(Clone, Default)]
@@ -65,59 +69,42 @@ fn get_config() -> Option<&'static CountTokensConfig> {
     COUNT_TOKENS_CONFIG.get()
 }
 
-/// 判断字符是否为非西文字符
-///
-/// 西文字符包括：
-/// - ASCII 字符 (U+0000..U+007F)
-/// - 拉丁字母扩展 (U+0080..U+024F)
-/// - 拉丁字母扩展附加 (U+1E00..U+1EFF)
-///
-/// 返回 true 表示该字符是非西文字符（如中文、日文、韩文、阿拉伯文等）
-fn is_non_western_char(c: char) -> bool {
-    !matches!(c,
-        // 基本 ASCII
-        '\u{0000}'..='\u{007F}' |
-        // 拉丁字母扩展-A (Latin Extended-A)
-        '\u{0080}'..='\u{00FF}' |
-        // 拉丁字母扩展-B (Latin Extended-B)
-        '\u{0100}'..='\u{024F}' |
-        // 拉丁字母扩展附加 (Latin Extended Additional)
-        '\u{1E00}'..='\u{1EFF}' |
-        // 拉丁字母扩展-C/D/E
-        '\u{2C60}'..='\u{2C7F}' |
-        '\u{A720}'..='\u{A7FF}' |
-        '\u{AB30}'..='\u{AB6F}'
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c,
+        '\u{4E00}'..='\u{9FFF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{3040}'..='\u{309F}'
+            | '\u{30A0}'..='\u{30FF}'
+            | '\u{AC00}'..='\u{D7AF}'
+            | '\u{1100}'..='\u{11FF}'
+            | '\u{3130}'..='\u{318F}'
     )
 }
 
 /// 计算文本的 token 数量
-///
-/// # 计算规则
-/// - 非西文字符：每个计 4.5 个字符单位
-/// - 西文字符：每个计 1 个字符单位
-/// - 4 个字符单位 = 1 token（四舍五入）
-/// ```
 pub fn count_tokens(text: &str) -> u64 {
-    // println!("text: {}", text);
-
-    let char_units: f64 = text
-        .chars()
-        .map(|c| if is_non_western_char(c) { 4.0 } else { 1.0 })
-        .sum();
-
-    let tokens = char_units / 4.0;
-
-    if tokens < 100.0 {
-        (tokens * 1.5) as u64
-    } else if tokens < 200.0 {
-        (tokens * 1.3) as u64
-    } else if tokens < 300.0 {
-        (tokens * 1.25) as u64
-    } else if tokens < 800.0 {
-        (tokens * 1.2) as u64
-    } else {
-        tokens as u64
+    if text.is_empty() {
+        return 0;
     }
+
+    let mut cjk_count = 0usize;
+    let mut other_count = 0usize;
+
+    for c in text.chars() {
+        if c.is_whitespace() {
+            continue;
+        }
+
+        if is_cjk(c) {
+            cjk_count += 1;
+        } else {
+            other_count += 1;
+        }
+    }
+
+    let tokens = (cjk_count as f64 / 1.5) + (other_count as f64 / 3.5);
+    tokens.round() as u64
 }
 
 /// 估算请求的输入 tokens
@@ -202,94 +189,78 @@ async fn call_remote_count_tokens(
     Ok(result.input_tokens as u64)
 }
 
+fn estimate_messages_tokens(messages: &[Message]) -> u64 {
+    if messages.is_empty() {
+        return 0;
+    }
+
+    let json = serde_json::to_string(messages).unwrap_or_default();
+    count_tokens(&json) + messages.len() as u64 * TOKENS_PER_MESSAGE
+}
+
+fn count_serialized_value_tokens(value: &serde_json::Value) -> u64 {
+    let json = serde_json::to_string(value).unwrap_or_default();
+    count_tokens(&json)
+}
+
+fn estimate_content_block_tokens(obj: &serde_json::Map<String, serde_json::Value>) -> u64 {
+    if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+        return count_tokens(text);
+    }
+
+    if let Some(thinking) = obj.get("thinking").and_then(|v| v.as_str()) {
+        return count_tokens(thinking);
+    }
+
+    if let Some(input) = obj.get("input") {
+        return count_serialized_value_tokens(input);
+    }
+
+    if let Some(content) = obj.get("content") {
+        return count_message_content_tokens(content);
+    }
+
+    0
+}
+
 /// 本地计算请求的输入 tokens
 fn count_all_tokens_local(
     system: Option<Vec<SystemMessage>>,
     messages: Vec<Message>,
     tools: Option<Vec<Tool>>,
 ) -> u64 {
-    let mut total = 0;
+    let system_tokens: u64 = system
+        .unwrap_or_default()
+        .iter()
+        .map(count_system_message_tokens)
+        .sum();
+    let message_tokens = estimate_messages_tokens(&messages);
+    let tool_tokens = tools
+        .as_ref()
+        .map(|items| items.len() as u64 * TOKENS_PER_TOOL)
+        .unwrap_or(0);
 
-    // 系统消息
-    if let Some(ref system) = system {
-        for msg in system {
-            total += count_tokens(&msg.text);
-        }
-    }
-
-    // 用户消息
-    for msg in &messages {
-        if let serde_json::Value::String(s) = &msg.content {
-            total += count_tokens(s);
-        } else if let serde_json::Value::Array(arr) = &msg.content {
-            for item in arr {
-                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                    total += count_tokens(text);
-                }
-            }
-        }
-    }
-
-    // 工具定义
-    if let Some(ref tools) = tools {
-        for tool in tools {
-            total += count_tokens(&tool.name);
-            total += count_tokens(&tool.description);
-            let input_schema_json = serde_json::to_string(&tool.input_schema).unwrap_or_default();
-            total += count_tokens(&input_schema_json);
-        }
-    }
-
-    total.max(1)
+    (system_tokens + message_tokens + tool_tokens).max(1)
 }
 
 /// 估算输出 tokens
 pub(crate) fn estimate_output_tokens(content: &[serde_json::Value]) -> i32 {
-    let mut total = 0;
-
-    for block in content {
-        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-            total += count_tokens(text) as i32;
-        }
-        if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-            // 工具调用开销
-            if let Some(input) = block.get("input") {
-                let input_str = serde_json::to_string(input).unwrap_or_default();
-                total += count_tokens(&input_str) as i32;
-            }
-        }
-    }
+    let total: i32 = content
+        .iter()
+        .map(|block| count_message_content_tokens(block) as i32)
+        .sum();
 
     total.max(1)
 }
 
 /// 计算系统消息的 tokens
 pub(crate) fn count_system_message_tokens(message: &SystemMessage) -> u64 {
-    let mut total = count_tokens(&message.text);
-
-    if let Some(block_type) = &message.block_type {
-        total += count_tokens(block_type);
-    }
-
-    total
+    count_tokens(&message.text)
 }
 
 /// 计算工具定义的 tokens
-pub(crate) fn count_tool_definition_tokens(tool: &Tool) -> u64 {
-    let mut total = count_tokens(&tool.name);
-    total += count_tokens(&tool.description);
-
-    if let Some(tool_type) = &tool.tool_type {
-        total += count_tokens(tool_type);
-    }
-
-    if let Some(max_uses) = tool.max_uses {
-        total += count_tokens(&max_uses.to_string());
-    }
-
-    let input_schema_json = serde_json::to_string(&tool.input_schema).unwrap_or_default();
-    total += count_tokens(&input_schema_json);
-    total
+pub(crate) fn count_tool_definition_tokens(_tool: &Tool) -> u64 {
+    TOKENS_PER_TOOL
 }
 
 /// 计算消息内容的 tokens
@@ -298,44 +269,7 @@ pub(crate) fn count_message_content_tokens(value: &serde_json::Value) -> u64 {
         serde_json::Value::Null => 0,
         serde_json::Value::String(s) => count_tokens(s),
         serde_json::Value::Array(arr) => arr.iter().map(count_message_content_tokens).sum(),
-        serde_json::Value::Object(obj) => match obj.get("type").and_then(|v| v.as_str()) {
-            Some("text") => obj
-                .get("text")
-                .and_then(|v| v.as_str())
-                .map(count_tokens)
-                .unwrap_or(0),
-            Some("thinking") => obj
-                .get("thinking")
-                .and_then(|v| v.as_str())
-                .map(count_tokens)
-                .unwrap_or(0),
-            Some("tool_use") => {
-                let name_tokens = obj
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(count_tokens)
-                    .unwrap_or(0);
-                let input_tokens = obj
-                    .get("input")
-                    .map(|v| {
-                        let json_str = serde_json::to_string(v).unwrap_or_default();
-                        count_tokens(&json_str)
-                    })
-                    .unwrap_or(0);
-                name_tokens + input_tokens
-            }
-            Some("tool_result") => {
-                let content_tokens = obj
-                    .get("content")
-                    .map(count_message_content_tokens)
-                    .unwrap_or(0);
-                content_tokens
-            }
-            _ => {
-                // 未知类型，递归计算所有字段
-                obj.values().map(count_message_content_tokens).sum()
-            }
-        },
+        serde_json::Value::Object(obj) => estimate_content_block_tokens(obj),
         _ => 0,
     }
 }

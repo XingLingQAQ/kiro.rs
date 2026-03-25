@@ -821,6 +821,16 @@ pub async fn post_messages(
         websearch::strip_web_search_tools(&mut payload);
     }
 
+    let cache_profile = build_cache_profile(&state.cache_tracker, &payload, estimated_input_tokens);
+    let provisional_cache_context = provisional_cache_usage(&state.cache_tracker, &cache_profile);
+
+    tracing::info!(
+        provisional_cache_creation_input_tokens =
+            provisional_cache_context.cache_creation_input_tokens,
+        provisional_cache_read_input_tokens = provisional_cache_context.cache_read_input_tokens,
+        "Computed provisional cache usage for /v1/messages"
+    );
+
     // 剔除空 text content block（客户端可能将 tool_use-only 响应中的空 text block 写回 history）
     let stripped = strip_empty_text_content_blocks(&mut payload.messages);
     if stripped > 0 {
@@ -990,8 +1000,8 @@ pub async fn post_messages(
             &payload.model,
             estimated_input_tokens,
             user_id.as_deref(),
-            None,
-            None,
+            Some(&state.cache_tracker),
+            Some(&cache_profile),
         )
         .await
     }
@@ -1516,8 +1526,11 @@ pub async fn post_messages_cc(
     }
 
     // /cc/v1 的 cache profile 需要尽量贴近实际上游缓存前缀，因此基于 prepared payload 构建。
-    let prepared_cache_profile =
-        build_cache_profile(&state.cache_tracker, &prepared_payload, raw_input_tokens(&prepared_payload));
+    let prepared_cache_profile = build_cache_profile(
+        &state.cache_tracker,
+        &prepared_payload,
+        raw_input_tokens(&prepared_payload),
+    );
 
     // 初步计算 cache usage（仅用于入口日志，不能作为最终返回值）
     let provisional_cache_context =
@@ -1743,7 +1756,8 @@ async fn handle_stream_request_buffered(
         Err(e) => return map_kiro_provider_error_to_response(request_body, e),
     };
 
-    let final_cache_context = resolved_cache_usage(cache_tracker, api_result.credential_id, cache_profile);
+    let final_cache_context =
+        resolved_cache_usage(cache_tracker, api_result.credential_id, cache_profile);
     tracing::info!(
         credential_id = api_result.credential_id,
         final_cache_creation_input_tokens = final_cache_context.cache_creation_input_tokens,

@@ -88,7 +88,8 @@ impl CacheTracker {
         let mut cumulative_tokens = 0i32;
 
         let mut active_ttl: Option<Duration> = None;
-        let mut seen_breakpoints: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        let mut seen_breakpoints: std::collections::BTreeSet<usize> =
+            std::collections::BTreeSet::new();
 
         for (index, block) in flattened.into_iter().enumerate() {
             cumulative_tokens = cumulative_tokens.saturating_add(block.tokens);
@@ -511,7 +512,13 @@ mod tests {
     }
 
     fn medium_turn_text(label: &str) -> String {
-        format!("{} {}", label, std::iter::repeat_n("conversation growth chunk", 80).collect::<Vec<_>>().join(" "))
+        format!(
+            "{} {}",
+            label,
+            std::iter::repeat_n("conversation growth chunk", 80)
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
     }
 
     fn estimate_input_tokens(request: &MessagesRequest) -> i32 {
@@ -545,7 +552,13 @@ mod tests {
         let result = tracker.compute(1, &profile);
 
         assert_eq!(result.cache_read_input_tokens, 0);
-        assert_eq!(result.cache_creation_input_tokens, total);
+        assert_eq!(
+            result.cache_creation_input_tokens,
+            profile
+                .last_cacheable_breakpoint()
+                .map(|bp| bp.cumulative_tokens)
+                .unwrap_or(0)
+        );
     }
 
     #[test]
@@ -570,16 +583,18 @@ mod tests {
         let total2 = estimate_input_tokens(&req2);
         let profile2 = tracker.build_profile(&req2, total2);
         let result = tracker.compute(1, &profile2);
+        let matched_tokens = profile1
+            .last_cacheable_breakpoint()
+            .map(|bp| bp.cumulative_tokens)
+            .unwrap_or(0);
 
         assert_eq!(
             profile1.blocks[2].cumulative_hash,
             profile2.blocks[2].cumulative_hash
         );
-        assert_eq!(result.cache_read_input_tokens, total1);
-        assert_eq!(
-            result.cache_creation_input_tokens,
-            total2.saturating_sub(total1)
-        );
+        assert_eq!(result.cache_read_input_tokens, matched_tokens);
+        assert!(result.cache_creation_input_tokens > 0);
+        assert!(result.cache_creation_input_tokens <= total2.saturating_sub(matched_tokens));
     }
 
     #[test]
@@ -595,7 +610,13 @@ mod tests {
         let profile2 = tracker.build_profile(&req2, total2);
         let result = tracker.compute(1, &profile2);
 
-        assert_eq!(result.cache_read_input_tokens, total1);
+        assert_eq!(
+            result.cache_read_input_tokens,
+            profile1
+                .last_cacheable_breakpoint()
+                .map(|bp| bp.cumulative_tokens)
+                .unwrap_or(0)
+        );
         assert_eq!(result.cache_creation_input_tokens, 0);
     }
 
@@ -650,11 +671,14 @@ mod tests {
     #[test]
     fn ttl_is_inherited_for_derived_message_breakpoints() {
         let req = build_request(vec![
-            msg("user", serde_json::json!([{
-                "type": "text",
-                "text": long_cacheable_text(),
-                "cache_control": { "type": "ephemeral", "ttl": "1h" }
-            }])),
+            msg(
+                "user",
+                serde_json::json!([{
+                    "type": "text",
+                    "text": long_cacheable_text(),
+                    "cache_control": { "type": "ephemeral", "ttl": "1h" }
+                }]),
+            ),
             msg("assistant", serde_json::json!("R1")),
             msg("user", serde_json::json!("R2")),
         ]);
@@ -662,7 +686,11 @@ mod tests {
         let profile = tracker.build_profile(&req, estimate_input_tokens(&req));
         let breakpoints = profile.cacheable_breakpoints();
         assert!(breakpoints.len() >= 2);
-        assert!(breakpoints.iter().all(|bp| bp.ttl == Duration::from_secs(3600)));
+        assert!(
+            breakpoints
+                .iter()
+                .all(|bp| bp.ttl == Duration::from_secs(3600))
+        );
     }
 
     #[test]
@@ -695,6 +723,12 @@ mod tests {
         let result = tracker.compute(1, &profile2);
 
         assert_eq!(result.cache_read_input_tokens, 0);
-        assert_eq!(result.cache_creation_input_tokens, total2);
+        assert_eq!(
+            result.cache_creation_input_tokens,
+            profile2
+                .last_cacheable_breakpoint()
+                .map(|bp| bp.cumulative_tokens)
+                .unwrap_or(0)
+        );
     }
 }

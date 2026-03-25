@@ -648,7 +648,8 @@ pub async fn handle_websearch_request(
                 resolve_cache_usage(cache_tracker, api_result.credential_id, cache_profile);
             tracing::info!(
                 credential_id = api_result.credential_id,
-                final_cache_creation_input_tokens = resolved_cache_context.cache_creation_input_tokens,
+                final_cache_creation_input_tokens =
+                    resolved_cache_context.cache_creation_input_tokens,
                 final_cache_read_input_tokens = resolved_cache_context.cache_read_input_tokens,
                 "Resolved cache usage for websearch request"
             );
