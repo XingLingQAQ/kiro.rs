@@ -24,6 +24,10 @@ pub struct WebSearchCacheContext {
     pub cache_read_input_tokens: i32,
 }
 
+fn billed_input_tokens(input_tokens: i32, cache_read_input_tokens: i32) -> i32 {
+    input_tokens.saturating_sub(cache_read_input_tokens).max(0)
+}
+
 fn resolve_cache_usage(
     cache_tracker: &crate::anthropic::cache_tracker::CacheTracker,
     credential_id: u64,
@@ -377,6 +381,8 @@ fn generate_websearch_events(
 ) -> Vec<SseEvent> {
     let mut events = Vec::new();
     let message_id = format!("msg_{}", &Uuid::new_v4().to_string().replace('-', "")[..24]);
+    let billed_input_tokens =
+        billed_input_tokens(input_tokens, cache_context.cache_read_input_tokens);
 
     // 1. message_start
     // /cc/v1 本地 WebSearch 的 usage 必须沿用外层基于 raw payload 预先计算的统计口径。
@@ -392,7 +398,7 @@ fn generate_websearch_events(
                 "content": [],
                 "stop_reason": null,
                 "usage": {
-                    "input_tokens": input_tokens,
+                    "input_tokens": billed_input_tokens,
                     "output_tokens": 0,
                     "cache_creation_input_tokens": cache_context.cache_creation_input_tokens,
                     "cache_read_input_tokens": cache_context.cache_read_input_tokens
@@ -559,7 +565,7 @@ fn generate_websearch_events(
                 "stop_reason": "end_turn"
             },
             "usage": {
-                "input_tokens": input_tokens,
+                "input_tokens": billed_input_tokens,
                 "output_tokens": output_tokens,
                 "cache_creation_input_tokens": cache_context.cache_creation_input_tokens,
                 "cache_read_input_tokens": cache_context.cache_read_input_tokens,
@@ -699,6 +705,9 @@ pub async fn handle_websearch_request(
     };
 
     let output_tokens = (summary.len() as i32 + 3) / 4; // 简单估算
+    let billed_input_tokens = input_tokens
+        .saturating_sub(final_cache_context.cache_read_input_tokens)
+        .max(0);
 
     let response_body = json!({
         "id": format!("msg_{}", &Uuid::new_v4().to_string().replace('-', "")[..24]),
@@ -725,7 +734,7 @@ pub async fn handle_websearch_request(
         "stop_reason": "end_turn",
         "stop_sequence": null,
         "usage": {
-            "input_tokens": input_tokens,
+            "input_tokens": billed_input_tokens,
             "output_tokens": output_tokens,
             "cache_creation_input_tokens": final_cache_context.cache_creation_input_tokens,
             "cache_read_input_tokens": final_cache_context.cache_read_input_tokens
@@ -843,7 +852,7 @@ mod tests {
             .find(|e| e.event == "message_delta")
             .expect("should have message_delta");
 
-        assert_eq!(message_start.data["message"]["usage"]["input_tokens"], 123);
+        assert_eq!(message_start.data["message"]["usage"]["input_tokens"], 114);
         assert_eq!(
             message_start.data["message"]["usage"]["cache_creation_input_tokens"],
             7
@@ -853,7 +862,7 @@ mod tests {
             9
         );
 
-        assert_eq!(message_delta.data["usage"]["input_tokens"], 123);
+        assert_eq!(message_delta.data["usage"]["input_tokens"], 114);
         assert_eq!(
             message_delta.data["usage"]["cache_creation_input_tokens"],
             7

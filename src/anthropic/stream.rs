@@ -1164,6 +1164,7 @@ impl BufferedStreamContext {
         // 避免 prepare/压缩/上游注入提示词污染 /cc/v1 兼容统计。
         // credit usage 仅透传上游 meteringEvent，不覆盖本地 raw input/cache usage。
         let final_input_tokens = self.estimated_input_tokens;
+        let billed_input_tokens = final_input_tokens.saturating_sub(self.cache_read_input_tokens).max(0);
 
         #[cfg(feature = "sensitive-logs")]
         tracing::info!(
@@ -1185,7 +1186,7 @@ impl BufferedStreamContext {
                 && let Some(message) = event.data.get_mut("message")
                 && let Some(usage) = message.get_mut("usage")
             {
-                usage["input_tokens"] = serde_json::json!(final_input_tokens);
+                usage["input_tokens"] = serde_json::json!(billed_input_tokens);
                 usage["cache_creation_input_tokens"] =
                     serde_json::json!(self.cache_creation_input_tokens);
                 usage["cache_read_input_tokens"] = serde_json::json!(self.cache_read_input_tokens);
@@ -1194,7 +1195,7 @@ impl BufferedStreamContext {
             if event.event == "message_delta"
                 && let Some(usage) = event.data.get_mut("usage")
             {
-                usage["input_tokens"] = serde_json::json!(final_input_tokens);
+                usage["input_tokens"] = serde_json::json!(billed_input_tokens);
                 usage["cache_creation_input_tokens"] =
                     serde_json::json!(self.cache_creation_input_tokens);
                 usage["cache_read_input_tokens"] = serde_json::json!(self.cache_read_input_tokens);
@@ -1323,12 +1324,12 @@ mod tests {
             .map(|e| e.data["usage"].clone())
             .expect("message_delta should exist");
 
-        assert_eq!(message_start_usage["input_tokens"], json!(321));
+        assert_eq!(message_start_usage["input_tokens"], json!(313));
         assert_eq!(message_start_usage["cache_creation_input_tokens"], json!(7));
         assert_eq!(message_start_usage["cache_read_input_tokens"], json!(8));
         assert!(message_start_usage.get("credit_usage").is_none());
 
-        assert_eq!(message_delta_usage["input_tokens"], json!(321));
+        assert_eq!(message_delta_usage["input_tokens"], json!(313));
         assert_eq!(message_delta_usage["cache_creation_input_tokens"], json!(7));
         assert_eq!(message_delta_usage["cache_read_input_tokens"], json!(8));
     }
@@ -1967,7 +1968,7 @@ mod tests {
             .find(|e| e.event == "message_delta")
             .expect("should have message_delta event");
 
-        assert_eq!(message_start.data["message"]["usage"]["input_tokens"], 321);
+        assert_eq!(message_start.data["message"]["usage"]["input_tokens"], 287);
         assert_eq!(
             message_start.data["message"]["usage"]["cache_creation_input_tokens"],
             12
@@ -1977,7 +1978,7 @@ mod tests {
             34
         );
 
-        assert_eq!(message_delta.data["usage"]["input_tokens"], 321);
+        assert_eq!(message_delta.data["usage"]["input_tokens"], 287);
         assert_eq!(
             message_delta.data["usage"]["cache_creation_input_tokens"],
             12

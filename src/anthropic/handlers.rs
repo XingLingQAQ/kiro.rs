@@ -96,6 +96,10 @@ fn inject_cache_usage_fields(usage: &mut serde_json::Value, cache_context: Cache
     usage["cache_read_input_tokens"] = json!(cache_context.cache_read_input_tokens);
 }
 
+fn billed_input_tokens(input_tokens: i32, cache_read_input_tokens: i32) -> i32 {
+    input_tokens.saturating_sub(cache_read_input_tokens).max(0)
+}
+
 fn inject_credit_usage_fields(usage: &mut serde_json::Value, metering: &MeteringEvent) {
     usage["credit_usage"] = json!(metering.usage);
     usage["credit_unit"] = json!(metering.unit);
@@ -1332,22 +1336,27 @@ async fn handle_non_stream_request(
 
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
     let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
+    let billed_input_tokens = final_cache_context
+        .map(|ctx| billed_input_tokens(final_input_tokens, ctx.cache_read_input_tokens))
+        .unwrap_or(final_input_tokens);
 
     #[cfg(feature = "sensitive-logs")]
     tracing::info!(
         estimated_input_tokens = input_tokens,
         context_input_tokens = ?context_input_tokens,
         final_input_tokens,
+        billed_input_tokens,
         output_tokens,
-        "Non-stream usage: final_input_tokens={} (来源={}), output_tokens={}",
+        "Non-stream usage: final_input_tokens={} (来源={}), billed_input_tokens={}, output_tokens={}",
         final_input_tokens,
         if context_input_tokens.is_some() { "contextUsageEvent" } else { "估算" },
+        billed_input_tokens,
         output_tokens
     );
 
     let response_body = {
         let mut usage = json!({
-            "input_tokens": final_input_tokens,
+            "input_tokens": billed_input_tokens,
             "output_tokens": output_tokens
         });
         if let Some(ref metering) = metering {
@@ -2078,6 +2087,13 @@ mod tests {
 
         assert!(resolved.cache_read_input_tokens > 0);
         assert!(resolved.cache_creation_input_tokens <= provisional.cache_creation_input_tokens);
+    }
+
+    #[test]
+    fn test_billed_input_tokens_subtracts_cache_reads() {
+        assert_eq!(billed_input_tokens(3829, 1788), 2041);
+        assert_eq!(billed_input_tokens(4131, 2544), 1587);
+        assert_eq!(billed_input_tokens(10, 20), 0);
     }
 
     #[test]
