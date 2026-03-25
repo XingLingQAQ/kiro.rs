@@ -1,11 +1,12 @@
-.PHONY: dev build release clean test lint fmt ui ui-dev docker help
+.PHONY: dev run build release clean test lint fmt ui ui-dev docker help
 
 # 默认目标
 help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "开发:"
-	@echo "  dev        cargo run（debug 模式，需先 make ui）"
+	@echo "  dev        启动前端 dev server + Rust 后端"
+	@echo "  run        构建前端并运行 Rust 后端"
 	@echo "  ui-dev     启动前端 dev server"
 	@echo ""
 	@echo "构建:"
@@ -29,12 +30,18 @@ ui:
 	cd admin-ui && pnpm install && pnpm build
 
 ui-dev:
-	@echo "启动前端 dev server: http://localhost:5173"
+	@echo "启动前端 dev server: http://localhost:5173/admin/"
 	cd admin-ui && pnpm install && pnpm dev
 
 # --- 后端 ---
 
-dev: ui
+dev:
+	@echo "启动开发模式：前端 dev server + Rust 后端"
+	@echo "前端访问地址请使用: http://localhost:5173/admin/"
+	@cd admin-ui && pnpm install && pnpm dev & \
+	cargo run --features sensitive-logs -- -c config/config.json --credentials config/credentials.json
+
+run: ui
 	cargo run --features sensitive-logs -- -c config/config.json --credentials config/credentials.json
 
 build: ui
