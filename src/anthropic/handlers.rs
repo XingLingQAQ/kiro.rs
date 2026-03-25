@@ -962,6 +962,8 @@ pub async fn post_messages(
         // 流式响应
         handle_stream_request(
             provider,
+            &state.cache_tracker,
+            &cache_profile,
             &request_body,
             &payload.model,
             estimated_input_tokens,
@@ -985,6 +987,8 @@ pub async fn post_messages(
 }
 async fn handle_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    cache_tracker: &std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>,
+    cache_profile: &crate::anthropic::cache_tracker::CacheProfile,
     request_body: &str,
     model: &str,
     input_tokens: i32,
@@ -997,8 +1001,24 @@ async fn handle_stream_request(
         Err(e) => return map_kiro_provider_error_to_response(request_body, e),
     };
 
+    let final_cache_context =
+        resolved_cache_usage(cache_tracker, api_result.credential_id, cache_profile);
+    tracing::info!(
+        credential_id = api_result.credential_id,
+        final_cache_creation_input_tokens = final_cache_context.cache_creation_input_tokens,
+        final_cache_read_input_tokens = final_cache_context.cache_read_input_tokens,
+        "Resolved cache usage for stream request"
+    );
+    cache_tracker.update(api_result.credential_id, cache_profile);
+
     // 创建流处理上下文
-    let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled);
+    let mut ctx = StreamContext::new_with_thinking(
+        model,
+        input_tokens,
+        final_cache_context.cache_creation_input_tokens,
+        final_cache_context.cache_read_input_tokens,
+        thinking_enabled,
+    );
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
@@ -1175,8 +1195,8 @@ async fn handle_non_stream_request(
     let mut tool_uses: Vec<serde_json::Value> = Vec::new();
     let mut has_tool_use = false;
     let mut stop_reason = "end_turn".to_string();
-    // 从 contextUsageEvent 计算的实际输入 tokens
-    let mut context_input_tokens: Option<i32> = None;
+    #[cfg(feature = "sensitive-logs")]
+    let mut context_input_tokens_for_log: Option<i32> = None;
     // 从 meteringEvent 透传的 credit usage，仅用于最终 usage 字段
     let mut metering: Option<MeteringEvent> = None;
 
@@ -1265,7 +1285,10 @@ async fn handle_non_stream_request(
                             let actual_input_tokens =
                                 (context_usage.context_usage_percentage * context_window / 100.0)
                                     as i32;
-                            context_input_tokens = Some(actual_input_tokens);
+                            #[cfg(feature = "sensitive-logs")]
+                            {
+                                context_input_tokens_for_log = Some(actual_input_tokens);
+                            }
                             // 上下文使用量达到 100% 时，设置 stop_reason 为 model_context_window_exceeded
                             if context_usage.context_usage_percentage >= 100.0 {
                                 stop_reason = "model_context_window_exceeded".to_string();
@@ -1321,8 +1344,8 @@ async fn handle_non_stream_request(
     // 估算输出 tokens
     let output_tokens = token::estimate_output_tokens(&content);
 
-    // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
-    let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
+    // non-stream 与 stream 保持一致：始终使用本地估算的 input_tokens 作为最终口径。
+    let final_input_tokens = input_tokens;
     let billed_input_tokens = final_cache_context
         .map(|ctx| billed_input_tokens(final_input_tokens, ctx.cache_read_input_tokens))
         .unwrap_or(final_input_tokens);
@@ -1330,13 +1353,13 @@ async fn handle_non_stream_request(
     #[cfg(feature = "sensitive-logs")]
     tracing::info!(
         estimated_input_tokens = input_tokens,
-        context_input_tokens = ?context_input_tokens,
+        context_input_tokens = ?context_input_tokens_for_log,
         final_input_tokens,
         billed_input_tokens,
         output_tokens,
-        "Non-stream usage: final_input_tokens={} (来源={}), billed_input_tokens={}, output_tokens={}",
+        "Non-stream usage: final_input_tokens={} (估算值), context_input_tokens={} (上游值), billed_input_tokens={}, output_tokens={}",
         final_input_tokens,
-        if context_input_tokens.is_some() { "contextUsageEvent" } else { "估算" },
+        context_input_tokens_for_log.map_or("N/A".to_string(), |v| v.to_string()),
         billed_input_tokens,
         output_tokens
     );
@@ -1659,6 +1682,21 @@ mod tests {
         assert_eq!(billed_input_tokens(3829, 1788), 2041);
         assert_eq!(billed_input_tokens(4131, 2544), 1587);
         assert_eq!(billed_input_tokens(10, 20), 0);
+    }
+
+    #[test]
+    fn test_non_stream_usage_uses_estimated_input_tokens_as_base() {
+        let estimated_input_tokens = 1493;
+        let upstream_context_input_tokens = 3106;
+        let cache_read_input_tokens = 1480;
+
+        let final_input_tokens = estimated_input_tokens;
+        let billed = billed_input_tokens(final_input_tokens, cache_read_input_tokens);
+
+        assert_eq!(final_input_tokens, 1493);
+        assert_eq!(upstream_context_input_tokens, 3106);
+        assert_eq!(billed, 13);
+        assert_ne!(final_input_tokens, upstream_context_input_tokens);
     }
 
     #[test]
