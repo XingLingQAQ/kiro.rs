@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.1.13] - 2026-03-25
 
 ### Fixed
 - **流式与非流式 usage 口径对齐** — `/v1/messages` 流式响应补齐 `cache_creation_input_tokens` / `cache_read_input_tokens`，并将 `message_delta.usage.input_tokens` 统一为 billed input；同时增强 `tools/test_prompt_cache_usage.mjs`，支持显式 stream/non-stream 测试、SSE 解析与更详细 usage 输出 (`src/anthropic/handlers.rs`, `src/anthropic/stream.rs`, `tools/test_prompt_cache_usage.mjs`)
