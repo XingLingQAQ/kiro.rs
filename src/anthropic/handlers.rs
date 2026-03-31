@@ -47,6 +47,16 @@ struct CacheUsageContext {
     cache_read_input_tokens: i32,
 }
 
+struct StreamRequestContext<'a> {
+    cache_tracker: &'a std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>,
+    cache_profile: &'a crate::anthropic::cache_tracker::CacheProfile,
+    request_body: &'a str,
+    model: &'a str,
+    input_tokens: i32,
+    thinking_enabled: bool,
+    user_id: Option<&'a str>,
+}
+
 fn build_cache_profile(
     cache_tracker: &crate::anthropic::cache_tracker::CacheTracker,
     payload: &MessagesRequest,
@@ -87,8 +97,15 @@ fn inject_cache_usage_fields(usage: &mut serde_json::Value, cache_context: Cache
     usage["cache_read_input_tokens"] = json!(cache_context.cache_read_input_tokens);
 }
 
-fn billed_input_tokens(input_tokens: i32, cache_read_input_tokens: i32) -> i32 {
-    input_tokens.saturating_sub(cache_read_input_tokens).max(0)
+fn billed_input_tokens(
+    input_tokens: i32,
+    cache_creation_input_tokens: i32,
+    cache_read_input_tokens: i32,
+) -> i32 {
+    input_tokens
+        .saturating_sub(cache_creation_input_tokens)
+        .saturating_sub(cache_read_input_tokens)
+        .max(0)
 }
 
 fn inject_credit_usage_fields(usage: &mut serde_json::Value, metering: &MeteringEvent) {
@@ -960,17 +977,16 @@ pub async fn post_messages(
 
     if payload.stream {
         // 流式响应
-        handle_stream_request(
-            provider,
-            &state.cache_tracker,
-            &cache_profile,
-            &request_body,
-            &payload.model,
-            estimated_input_tokens,
+        let stream_request = StreamRequestContext {
+            cache_tracker: &state.cache_tracker,
+            cache_profile: &cache_profile,
+            request_body: &request_body,
+            model: &payload.model,
+            input_tokens: estimated_input_tokens,
             thinking_enabled,
-            user_id.as_deref(),
-        )
-        .await
+            user_id: user_id.as_deref(),
+        };
+        handle_stream_request(provider, stream_request).await
     } else {
         // 非流式响应
         handle_non_stream_request(
@@ -987,37 +1003,39 @@ pub async fn post_messages(
 }
 async fn handle_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
-    cache_tracker: &std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>,
-    cache_profile: &crate::anthropic::cache_tracker::CacheProfile,
-    request_body: &str,
-    model: &str,
-    input_tokens: i32,
-    thinking_enabled: bool,
-    user_id: Option<&str>,
+    context: StreamRequestContext<'_>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let api_result = match provider.call_api_stream(request_body, user_id).await {
+    let api_result = match provider
+        .call_api_stream(context.request_body, context.user_id)
+        .await
+    {
         Ok(resp) => resp,
-        Err(e) => return map_kiro_provider_error_to_response(request_body, e),
+        Err(e) => return map_kiro_provider_error_to_response(context.request_body, e),
     };
 
-    let final_cache_context =
-        resolved_cache_usage(cache_tracker, api_result.credential_id, cache_profile);
+    let final_cache_context = resolved_cache_usage(
+        context.cache_tracker,
+        api_result.credential_id,
+        context.cache_profile,
+    );
     tracing::info!(
         credential_id = api_result.credential_id,
         final_cache_creation_input_tokens = final_cache_context.cache_creation_input_tokens,
         final_cache_read_input_tokens = final_cache_context.cache_read_input_tokens,
         "Resolved cache usage for stream request"
     );
-    cache_tracker.update(api_result.credential_id, cache_profile);
+    context
+        .cache_tracker
+        .update(api_result.credential_id, context.cache_profile);
 
     // 创建流处理上下文
     let mut ctx = StreamContext::new_with_thinking(
-        model,
-        input_tokens,
+        context.model,
+        context.input_tokens,
         final_cache_context.cache_creation_input_tokens,
         final_cache_context.cache_read_input_tokens,
-        thinking_enabled,
+        context.thinking_enabled,
     );
 
     // 生成初始事件
@@ -1347,7 +1365,13 @@ async fn handle_non_stream_request(
     // non-stream 与 stream 保持一致：始终使用本地估算的 input_tokens 作为最终口径。
     let final_input_tokens = input_tokens;
     let billed_input_tokens = final_cache_context
-        .map(|ctx| billed_input_tokens(final_input_tokens, ctx.cache_read_input_tokens))
+        .map(|ctx| {
+            billed_input_tokens(
+                final_input_tokens,
+                ctx.cache_creation_input_tokens,
+                ctx.cache_read_input_tokens,
+            )
+        })
         .unwrap_or(final_input_tokens);
 
     #[cfg(feature = "sensitive-logs")]
@@ -1678,24 +1702,29 @@ mod tests {
     }
 
     #[test]
-    fn test_billed_input_tokens_subtracts_cache_reads() {
-        assert_eq!(billed_input_tokens(3829, 1788), 2041);
-        assert_eq!(billed_input_tokens(4131, 2544), 1587);
-        assert_eq!(billed_input_tokens(10, 20), 0);
+    fn test_billed_input_tokens_subtracts_cache_tokens() {
+        assert_eq!(billed_input_tokens(3829, 0, 1788), 2041);
+        assert_eq!(billed_input_tokens(4131, 544, 2544), 1043);
+        assert_eq!(billed_input_tokens(10, 3, 20), 0);
     }
 
     #[test]
     fn test_non_stream_usage_uses_estimated_input_tokens_as_base() {
         let estimated_input_tokens = 1493;
         let upstream_context_input_tokens = 3106;
+        let cache_creation_input_tokens = 9;
         let cache_read_input_tokens = 1480;
 
         let final_input_tokens = estimated_input_tokens;
-        let billed = billed_input_tokens(final_input_tokens, cache_read_input_tokens);
+        let billed = billed_input_tokens(
+            final_input_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        );
 
         assert_eq!(final_input_tokens, 1493);
         assert_eq!(upstream_context_input_tokens, 3106);
-        assert_eq!(billed, 13);
+        assert_eq!(billed, 4);
         assert_ne!(final_input_tokens, upstream_context_input_tokens);
     }
 

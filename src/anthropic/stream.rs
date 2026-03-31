@@ -540,6 +540,11 @@ impl StreamContext {
 
     /// 生成 message_start 事件
     pub fn create_message_start_event(&self) -> serde_json::Value {
+        let billed_input_tokens = billed_input_tokens(
+            self.input_tokens,
+            self.cache_creation_input_tokens,
+            self.cache_read_input_tokens,
+        );
         json!({
             "type": "message_start",
             "message": {
@@ -551,7 +556,7 @@ impl StreamContext {
                 "stop_reason": null,
                 "stop_sequence": null,
                 "usage": {
-                    "input_tokens": self.input_tokens,
+                    "input_tokens": billed_input_tokens,
                     "output_tokens": 1,
                     "cache_creation_input_tokens": self.cache_creation_input_tokens,
                     "cache_read_input_tokens": self.cache_read_input_tokens
@@ -1066,13 +1071,15 @@ impl StreamContext {
             events.extend(self.create_text_delta_events(" "));
         }
 
-        // 始终使用本地估算的 input_tokens 返回给客户端，
-        // 避免因服务端压缩导致上游返回的 token 数偏低，使客户端误判上下文大小。
+        // 始终基于本地估算输入与 cache 统计来生成 usage，
+        // 避免因服务端压缩导致上游 token 统计偏低，使客户端误判上下文大小。
         // credit usage 则仅透传上游 meteringEvent，不影响本地 input/cache usage 语义。
         let final_input_tokens = self.input_tokens;
-        let billed_input_tokens = final_input_tokens
-            .saturating_sub(self.cache_read_input_tokens)
-            .max(0);
+        let billed_input_tokens = billed_input_tokens(
+            final_input_tokens,
+            self.cache_creation_input_tokens,
+            self.cache_read_input_tokens,
+        );
 
         #[cfg(feature = "sensitive-logs")]
         tracing::info!(
@@ -1097,6 +1104,18 @@ impl StreamContext {
         ));
         events
     }
+}
+
+/// 将总输入 token 转为 Anthropic usage 的 input_tokens 口径（剔除 cache 读写）
+fn billed_input_tokens(
+    input_tokens: i32,
+    cache_creation_input_tokens: i32,
+    cache_read_input_tokens: i32,
+) -> i32 {
+    input_tokens
+        .saturating_sub(cache_creation_input_tokens)
+        .saturating_sub(cache_read_input_tokens)
+        .max(0)
 }
 
 /// 简单的 token 估算
@@ -1214,7 +1233,7 @@ mod tests {
             .map(|e| e.data["message"]["usage"].clone())
             .expect("message_start should exist");
 
-        assert_eq!(message_start_usage["input_tokens"], json!(321));
+        assert_eq!(message_start_usage["input_tokens"], json!(306));
         assert_eq!(message_start_usage["cache_creation_input_tokens"], json!(7));
         assert_eq!(message_start_usage["cache_read_input_tokens"], json!(8));
     }
@@ -1235,8 +1254,8 @@ mod tests {
             .map(|e| e.data["usage"].clone())
             .expect("message_delta should exist");
 
-        assert_eq!(message_start_usage["input_tokens"], json!(321));
-        assert_eq!(message_delta_usage["input_tokens"], json!(313));
+        assert_eq!(message_start_usage["input_tokens"], json!(306));
+        assert_eq!(message_delta_usage["input_tokens"], json!(306));
         assert_eq!(message_delta_usage["cache_creation_input_tokens"], json!(7));
         assert_eq!(message_delta_usage["cache_read_input_tokens"], json!(8));
     }

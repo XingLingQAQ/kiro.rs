@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **billed input_tokens 继续扣除 cache creation** — 统一 `handlers`、流式 SSE 与本地 WebSearch 三条路径的 billed input 计算，`usage.input_tokens` 现在同时扣除 `cache_creation_input_tokens` 与 `cache_read_input_tokens`，并同步更新相关断言以锁定一致语义 (`src/anthropic/handlers.rs`, `src/anthropic/stream.rs`, `src/anthropic/websearch.rs`)
+
 ## [v1.1.13] - 2026-03-25
 
 ### Fixed

@@ -24,8 +24,15 @@ pub struct WebSearchCacheContext {
     pub cache_read_input_tokens: i32,
 }
 
-fn billed_input_tokens(input_tokens: i32, cache_read_input_tokens: i32) -> i32 {
-    input_tokens.saturating_sub(cache_read_input_tokens).max(0)
+fn billed_input_tokens(
+    input_tokens: i32,
+    cache_creation_input_tokens: i32,
+    cache_read_input_tokens: i32,
+) -> i32 {
+    input_tokens
+        .saturating_sub(cache_creation_input_tokens)
+        .saturating_sub(cache_read_input_tokens)
+        .max(0)
 }
 
 fn resolve_cache_usage(
@@ -381,8 +388,11 @@ fn generate_websearch_events(
 ) -> Vec<SseEvent> {
     let mut events = Vec::new();
     let message_id = format!("msg_{}", &Uuid::new_v4().to_string().replace('-', "")[..24]);
-    let billed_input_tokens =
-        billed_input_tokens(input_tokens, cache_context.cache_read_input_tokens);
+    let billed_input_tokens = billed_input_tokens(
+        input_tokens,
+        cache_context.cache_creation_input_tokens,
+        cache_context.cache_read_input_tokens,
+    );
 
     // 1. message_start
     // 本地 WebSearch 的 usage 需要沿用外层预先计算的统计口径。
@@ -706,9 +716,11 @@ pub async fn handle_websearch_request(
     };
 
     let output_tokens = (summary.len() as i32 + 3) / 4; // 简单估算
-    let billed_input_tokens = input_tokens
-        .saturating_sub(final_cache_context.cache_read_input_tokens)
-        .max(0);
+    let billed_input_tokens = billed_input_tokens(
+        input_tokens,
+        final_cache_context.cache_creation_input_tokens,
+        final_cache_context.cache_read_input_tokens,
+    );
 
     let response_body = json!({
         "id": format!("msg_{}", &Uuid::new_v4().to_string().replace('-', "")[..24]),
@@ -853,7 +865,7 @@ mod tests {
             .find(|e| e.event == "message_delta")
             .expect("should have message_delta");
 
-        assert_eq!(message_start.data["message"]["usage"]["input_tokens"], 114);
+        assert_eq!(message_start.data["message"]["usage"]["input_tokens"], 107);
         assert_eq!(
             message_start.data["message"]["usage"]["cache_creation_input_tokens"],
             7
@@ -863,7 +875,7 @@ mod tests {
             9
         );
 
-        assert_eq!(message_delta.data["usage"]["input_tokens"], 114);
+        assert_eq!(message_delta.data["usage"]["input_tokens"], 107);
         assert_eq!(
             message_delta.data["usage"]["cache_creation_input_tokens"],
             7
