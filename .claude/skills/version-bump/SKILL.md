@@ -1,7 +1,7 @@
 ---
 name: version-bump
 description: 升级项目版本号并提交git，支持patch/minor/major版本升级或指定具体版本号，自动从git log生成CHANGELOG
-version: 1.2.0
+version: 1.2.1
 author: https://github.com/BenedictKing/kiro.rs/
 allowed-tools: Bash, Read, Write, Edit
 context: fork
@@ -34,13 +34,14 @@ context: fork
 
 ## 版本号修改位置（必须全部同步更新）
 
-> ⚠️ **每次版本升级必须同时修改以下所有位置，缺一不可！**
+> ⚠️ **每次版本升级必须同时修改以下所有位置，缺一不可！Rust 项目还必须同步检查并更新 `Cargo.lock` 中当前包（如 `kiro-rs`）的版本号，确保与发布版本一致。**
 
 | # | 文件 | 字段/内容 | 格式 | 示例 |
 |---|------|-----------|------|------|
 | 1 | `VERSION` | 整个文件内容 | `v{major}.{minor}.{patch}` | `v1.0.1` |
 | 2 | `Cargo.toml` | `version = "..."` (第3行) | `{major}.{minor}.{patch}` (无 `v` 前缀) | `"1.0.1"` |
-| 3 | `CHANGELOG.md` | `## [Unreleased]` → `## [v{版本}] - 日期` | `[v{major}.{minor}.{patch}] - YYYY-MM-DD` | `[v1.0.1] - 2026-02-08` |
+| 3 | `Cargo.lock` | 当前包（如 `kiro-rs`）的 `version = "..."` | `{major}.{minor}.{patch}` (无 `v` 前缀) | `"1.0.1"` |
+| 4 | `CHANGELOG.md` | `## [Unreleased]` → `## [v{版本}] - 日期` | `[v{major}.{minor}.{patch}] - YYYY-MM-DD` | `[v1.0.1] - 2026-02-08` |
 
 ## 执行步骤
 
@@ -69,6 +70,9 @@ echo "v{新版本号}" > VERSION
 
 # 更新 Cargo.toml 中的 version 字段（不带 v 前缀）
 # 使用 Edit 工具将 version = "旧版本" 替换为 version = "新版本"
+
+# Rust 项目额外要求：同步更新 Cargo.lock 中当前包（如 kiro-rs）的 version 字段
+# 使用 Edit 工具将 Cargo.lock 中对应 [[package]] 段落里的 version = "旧版本" 替换为 version = "新版本"
 ```
 
 ### 4. 更新 CHANGELOG.md
@@ -138,6 +142,7 @@ echo "v{新版本号}" > VERSION
 ```bash
 cat VERSION
 grep '^version' Cargo.toml
+grep -A2 '^name = "kiro-rs"' Cargo.lock
 cat CHANGELOG.md | head -20
 ```
 
@@ -152,10 +157,10 @@ git diff --stat
 
 **检查工作区状态：**
 
-1. 如果工作区有未提交的修改（除 VERSION、Cargo.toml 和 CHANGELOG.md 外），询问用户：
+1. 如果工作区有未提交的修改（除 VERSION、Cargo.toml、Cargo.lock 和 CHANGELOG.md 外），询问用户：
    - "检测到工作区有其他未提交的修改，是否一并提交？(Y/n)"
    - 如果用户选择 Y（默认），使用 `git add -A` 提交所有修改
-   - 如果用户选择 N，仅提交 VERSION、Cargo.toml 和 CHANGELOG.md
+   - 如果用户选择 N，仅提交 VERSION、Cargo.toml、Cargo.lock 和 CHANGELOG.md
 
 2. 提交信息规则：
    - 如果仅提交版本文件：`chore: bump version to v{新版本号}`
@@ -167,7 +172,7 @@ git add -A
 git commit -m "{用户确认的提交信息}"
 
 # 或仅提交版本文件
-git add VERSION Cargo.toml CHANGELOG.md
+git add VERSION Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "chore: bump version to v{新版本号}"
 ```
 
