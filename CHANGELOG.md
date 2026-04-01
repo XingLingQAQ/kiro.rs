@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Prompt Cache 前缀命中与归一化修复** — `cache_tracker` 改为基于前缀指纹匹配最近断点，避免不同消息形态产生误命中；同时将 `x-anthropic-billing-header` 归一化，确保计费头漂移不破坏缓存复用；`/v1/messages` 在 provisional cache 计算前先剔除空 text block，避免 tool_use-only 历史污染缓存指纹 (`src/anthropic/cache_tracker.rs`, `src/anthropic/handlers.rs`)
+
 ## [v1.1.14] - 2026-03-31
 
 ### Fixed

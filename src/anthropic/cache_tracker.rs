@@ -191,7 +191,7 @@ impl CacheTracker {
                     continue;
                 }
                 entry.expires_at = now + entry.ttl;
-                matched_tokens = entry.token_count.min(profile.total_input_tokens);
+                matched_tokens = breakpoint.cumulative_tokens.min(profile.total_input_tokens);
                 break 'outer;
             }
         }
@@ -630,7 +630,7 @@ mod tests {
         let system2 = vec![
             SystemMessage {
                 block_type: Some("text".to_string()),
-                text: "x-anthropic-billing-header: cc_version=2.1.87.2; cc_entrypoint=cli; cch=bbbbb;".to_string(),
+                text: "x-anthropic-billing-header: cc_version=2.1.87.222222222222222222; cc_entrypoint=cli; cch=bbbbb; extra_padding=xyzxyzxyzxyz;".to_string(),
                 cache_control: None,
             },
             SystemMessage {
@@ -652,8 +652,14 @@ mod tests {
         let total2 = estimate_input_tokens(&req2);
         let profile2 = tracker.build_profile(&req2, total2);
         let result = tracker.compute(1, &profile2);
+        let expected_match = profile2
+            .last_cacheable_breakpoint()
+            .map(|bp| bp.cumulative_tokens.min(profile2.total_input_tokens()))
+            .unwrap_or(0);
 
+        assert!(total1 != total2);
         assert!(result.cache_read_input_tokens > 0);
+        assert_eq!(result.cache_read_input_tokens, expected_match);
         assert_eq!(result.cache_creation_input_tokens, 0);
     }
 
