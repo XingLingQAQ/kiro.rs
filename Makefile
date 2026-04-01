@@ -40,7 +40,7 @@ dev:
 	@echo "前端访问地址请使用: http://localhost:5173/admin/"
 	@echo "前端 /api 请求会代理到: http://localhost:8990"
 	@cd admin-ui && pnpm install && pnpm dev & \
-	cargo run --features sensitive-logs -- -c config/config.json --credentials config/credentials.json
+	RUST_LOG=kiro_rs::anthropic::cache_tracker=debug,kiro_rs=info cargo run --features sensitive-logs -- -c config/config.json --credentials config/credentials.json
 
 run: ui
 	cargo run --features sensitive-logs -- -c config/config.json --credentials config/credentials.json
