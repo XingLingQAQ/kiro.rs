@@ -590,7 +590,16 @@ fn repair_non_empty_content_pass(state: &mut ConversationState) -> usize {
                 );
             }
             Message::Assistant(assistant_msg) => {
-                if repair_content_field(&mut assistant_msg.assistant_response_message.content) {
+                // 仅当 assistant 消息没有 tool_uses 时才修复空 content
+                let has_tool_uses = assistant_msg
+                    .assistant_response_message
+                    .tool_uses
+                    .as_ref()
+                    .map_or(false, |tools| !tools.is_empty());
+
+                if !has_tool_uses
+                    && repair_content_field(&mut assistant_msg.assistant_response_message.content)
+                {
                     repaired += 1;
                 }
             }

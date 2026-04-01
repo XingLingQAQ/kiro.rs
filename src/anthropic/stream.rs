@@ -411,6 +411,8 @@ impl SseStateManager {
         output_tokens: i32,
         cache_creation_input_tokens: i32,
         cache_read_input_tokens: i32,
+        cache_creation_5m_input_tokens: i32,
+        cache_creation_1h_input_tokens: i32,
         metering: Option<&MeteringEvent>,
     ) -> Vec<SseEvent> {
         let mut events = Vec::new();
@@ -436,7 +438,11 @@ impl SseStateManager {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "cache_creation_input_tokens": cache_creation_input_tokens,
-                "cache_read_input_tokens": cache_read_input_tokens
+                "cache_read_input_tokens": cache_read_input_tokens,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": cache_creation_5m_input_tokens,
+                    "ephemeral_1h_input_tokens": cache_creation_1h_input_tokens
+                }
             });
             if let Some(metering) = metering {
                 usage["credit_usage"] = json!(metering.usage);
@@ -483,6 +489,10 @@ pub struct StreamContext {
     pub cache_creation_input_tokens: i32,
     /// cache 读取输入 tokens
     pub cache_read_input_tokens: i32,
+    /// cache 创建 5分钟 TTL tokens
+    pub cache_creation_5m_input_tokens: i32,
+    /// cache 创建 1小时 TTL tokens
+    pub cache_creation_1h_input_tokens: i32,
     /// 从 contextUsageEvent 计算的实际输入 tokens
     pub context_input_tokens: Option<i32>,
     /// 输出 tokens 累计
@@ -524,6 +534,8 @@ impl StreamContext {
             input_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
+            cache_creation_5m_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
             context_input_tokens: None,
             output_tokens: 0,
             tool_block_indices: HashMap::new(),
@@ -1100,6 +1112,8 @@ impl StreamContext {
             self.output_tokens,
             self.cache_creation_input_tokens,
             self.cache_read_input_tokens,
+            self.cache_creation_5m_input_tokens,
+            self.cache_creation_1h_input_tokens,
             self.metering.as_ref(),
         ));
         events
@@ -1259,6 +1273,32 @@ mod tests {
         assert_eq!(message_delta_usage["cache_creation_input_tokens"], json!(7));
         assert_eq!(message_delta_usage["cache_read_input_tokens"], json!(8));
     }
+    #[test]
+    fn test_stream_context_extracts_cache_from_metering_event() {
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1000, 50, 800, false);
+        ctx.cache_creation_5m_input_tokens = 30;
+        ctx.cache_creation_1h_input_tokens = 20;
+
+        ctx.process_kiro_event(&Event::Metering(MeteringEvent {
+            unit: "credit".to_string(),
+            unit_plural: "credits".to_string(),
+            usage: 0.5,
+        }));
+
+        let final_events = ctx.generate_final_events();
+        let message_delta_usage = final_events
+            .iter()
+            .find(|e| e.event == "message_delta")
+            .map(|e| e.data["usage"].clone())
+            .expect("message_delta should exist");
+
+        assert_eq!(message_delta_usage["cache_read_input_tokens"], json!(800));
+        assert_eq!(message_delta_usage["cache_creation_input_tokens"], json!(50));
+        assert_eq!(message_delta_usage["cache_creation"]["ephemeral_5m_input_tokens"], json!(30));
+        assert_eq!(message_delta_usage["cache_creation"]["ephemeral_1h_input_tokens"], json!(20));
+        assert_eq!(message_delta_usage["input_tokens"], json!(150));
+    }
+
     #[test]
     fn test_text_delta_after_tool_use_restarts_text_block() {
         let mut ctx = StreamContext::new_with_thinking("test-model", 1, 0, 0, false);

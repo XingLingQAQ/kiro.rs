@@ -45,6 +45,8 @@ use super::websearch;
 struct CacheUsageContext {
     cache_creation_input_tokens: i32,
     cache_read_input_tokens: i32,
+    cache_creation_5m_input_tokens: i32,
+    cache_creation_1h_input_tokens: i32,
 }
 
 struct StreamRequestContext<'a> {
@@ -74,6 +76,8 @@ fn compute_cache_usage(
     CacheUsageContext {
         cache_creation_input_tokens: result.cache_creation_input_tokens,
         cache_read_input_tokens: result.cache_read_input_tokens,
+        cache_creation_5m_input_tokens: result.cache_creation_5m_input_tokens,
+        cache_creation_1h_input_tokens: result.cache_creation_1h_input_tokens,
     }
 }
 
@@ -95,6 +99,10 @@ fn resolved_cache_usage(
 fn inject_cache_usage_fields(usage: &mut serde_json::Value, cache_context: CacheUsageContext) {
     usage["cache_creation_input_tokens"] = json!(cache_context.cache_creation_input_tokens);
     usage["cache_read_input_tokens"] = json!(cache_context.cache_read_input_tokens);
+    usage["cache_creation"] = json!({
+        "ephemeral_5m_input_tokens": cache_context.cache_creation_5m_input_tokens,
+        "ephemeral_1h_input_tokens": cache_context.cache_creation_1h_input_tokens
+    });
 }
 
 fn billed_input_tokens(
@@ -1037,6 +1045,8 @@ async fn handle_stream_request(
         final_cache_context.cache_read_input_tokens,
         context.thinking_enabled,
     );
+    ctx.cache_creation_5m_input_tokens = final_cache_context.cache_creation_5m_input_tokens;
+    ctx.cache_creation_1h_input_tokens = final_cache_context.cache_creation_1h_input_tokens;
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
@@ -1740,11 +1750,15 @@ mod tests {
             CacheUsageContext {
                 cache_creation_input_tokens: 7,
                 cache_read_input_tokens: 8,
+                cache_creation_5m_input_tokens: 3,
+                cache_creation_1h_input_tokens: 4,
             },
         );
 
         assert_eq!(usage["cache_creation_input_tokens"], 7);
         assert_eq!(usage["cache_read_input_tokens"], 8);
+        assert_eq!(usage["cache_creation"]["ephemeral_5m_input_tokens"], 3);
+        assert_eq!(usage["cache_creation"]["ephemeral_1h_input_tokens"], 4);
     }
 
     #[test]

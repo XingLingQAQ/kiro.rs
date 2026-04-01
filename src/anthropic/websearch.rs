@@ -22,6 +22,8 @@ use super::types::{ErrorResponse, MessagesRequest};
 pub struct WebSearchCacheContext {
     pub cache_creation_input_tokens: i32,
     pub cache_read_input_tokens: i32,
+    pub cache_creation_5m_input_tokens: i32,
+    pub cache_creation_1h_input_tokens: i32,
 }
 
 fn billed_input_tokens(
@@ -44,6 +46,8 @@ fn resolve_cache_usage(
     WebSearchCacheContext {
         cache_creation_input_tokens: result.cache_creation_input_tokens,
         cache_read_input_tokens: result.cache_read_input_tokens,
+        cache_creation_5m_input_tokens: result.cache_creation_5m_input_tokens,
+        cache_creation_1h_input_tokens: result.cache_creation_1h_input_tokens,
     }
 }
 
@@ -853,6 +857,8 @@ mod tests {
             WebSearchCacheContext {
                 cache_creation_input_tokens: 7,
                 cache_read_input_tokens: 9,
+                cache_creation_5m_input_tokens: 3,
+                cache_creation_1h_input_tokens: 4,
             },
         );
 

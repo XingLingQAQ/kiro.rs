@@ -18,6 +18,8 @@ const MAX_BLOCK_LOOKBACK: usize = 20;
 pub struct CacheResult {
     pub cache_read_input_tokens: i32,
     pub cache_creation_input_tokens: i32,
+    pub cache_creation_5m_input_tokens: i32,
+    pub cache_creation_1h_input_tokens: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -148,9 +150,13 @@ impl CacheTracker {
         prune_expired(&mut entries.by_credential, now);
 
         let Some(credential_entries) = entries.by_credential.get_mut(&credential_id) else {
+            // 首次请求，需要创建缓存
+            let (cache_5m, cache_1h) = compute_ttl_breakdown(profile, 0);
             return CacheResult {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: last_breakpoint_tokens,
+                cache_creation_5m_input_tokens: cache_5m,
+                cache_creation_1h_input_tokens: cache_1h,
             };
         };
 
@@ -186,11 +192,14 @@ impl CacheTracker {
             }
         }
 
+        let new_tokens = last_breakpoint_tokens.saturating_sub(matched_tokens).max(0);
+        let (cache_5m, cache_1h) = compute_ttl_breakdown(profile, matched_tokens);
+
         CacheResult {
             cache_read_input_tokens: matched_tokens.max(0),
-            cache_creation_input_tokens: last_breakpoint_tokens
-                .saturating_sub(matched_tokens)
-                .max(0),
+            cache_creation_input_tokens: new_tokens,
+            cache_creation_5m_input_tokens: cache_5m,
+            cache_creation_1h_input_tokens: cache_1h,
         }
     }
 
@@ -224,6 +233,30 @@ impl CacheTracker {
             }
         }
     }
+}
+
+/// 计算不同 TTL 的缓存创建 token 数
+fn compute_ttl_breakdown(profile: &CacheProfile, matched_tokens: i32) -> (i32, i32) {
+    let mut cache_5m = 0;
+    let mut cache_1h = 0;
+
+    for breakpoint in profile.cacheable_breakpoints() {
+        let block = &profile.blocks[breakpoint.block_index];
+        let block_tokens = block.cumulative_tokens.min(profile.total_input_tokens);
+
+        if block_tokens <= matched_tokens {
+            continue;
+        }
+
+        let new_tokens = block_tokens - matched_tokens;
+        if breakpoint.ttl == ONE_HOUR_CACHE_TTL {
+            cache_1h += new_tokens;
+        } else {
+            cache_5m += new_tokens;
+        }
+    }
+
+    (cache_5m, cache_1h)
 }
 
 impl CacheProfile {
