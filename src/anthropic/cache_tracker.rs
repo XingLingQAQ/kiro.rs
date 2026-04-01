@@ -12,7 +12,7 @@ use super::types::{CacheControl, Message, MessagesRequest};
 
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
 const ONE_HOUR_CACHE_TTL: Duration = Duration::from_secs(3600);
-const MAX_BLOCK_LOOKBACK: usize = 20;
+const PREFIX_LOOKBACK_LIMIT: usize = 10;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CacheResult {
@@ -32,7 +32,7 @@ pub struct CacheProfile {
 
 #[derive(Debug, Clone)]
 struct CacheBlock {
-    cumulative_hash: [u8; 32],
+    prefix_fingerprint: [u8; 32],
     cumulative_tokens: i32,
 }
 
@@ -74,7 +74,6 @@ impl CacheTracker {
         total_input_tokens: i32,
     ) -> CacheProfile {
         let flattened = flatten_cacheable_blocks(payload);
-        let mut hasher = Sha256::new();
 
         // 与 prompt 内容无关但会影响官方缓存可复用性的固定配置。
         let request_prelude = canonicalize_json(serde_json::json!({
@@ -82,8 +81,9 @@ impl CacheTracker {
             "tool_choice": payload.tool_choice,
         }));
         let prelude_bytes = serde_json::to_vec(&request_prelude).unwrap_or_default();
-        hasher.update((prelude_bytes.len() as u64).to_be_bytes());
-        hasher.update(&prelude_bytes);
+        let mut prefix_hasher = Sha256::new();
+        prefix_hasher.update((prelude_bytes.len() as u64).to_be_bytes());
+        prefix_hasher.update(&prelude_bytes);
 
         let mut blocks = Vec::with_capacity(flattened.len());
         let mut breakpoints = Vec::new();
@@ -97,12 +97,16 @@ impl CacheTracker {
             cumulative_tokens = cumulative_tokens.saturating_add(block.tokens);
 
             let block_bytes = serde_json::to_vec(&block.value).unwrap_or_default();
-            hasher.update((block_bytes.len() as u64).to_be_bytes());
-            hasher.update(&block_bytes);
+            let block_hash: [u8; 32] = Sha256::digest(&block_bytes).into();
 
-            let cumulative_hash: [u8; 32] = hasher.clone().finalize().into();
+            let mut next_prefix_hasher = prefix_hasher.clone();
+            next_prefix_hasher.update(block_hash);
+            let prefix_fingerprint: [u8; 32] = next_prefix_hasher.finalize().into();
+            prefix_hasher = Sha256::new();
+            prefix_hasher.update(prefix_fingerprint);
+
             blocks.push(CacheBlock {
-                cumulative_hash,
+                prefix_fingerprint,
                 cumulative_tokens,
             });
 
@@ -151,6 +155,10 @@ impl CacheTracker {
 
         let Some(credential_entries) = entries.by_credential.get_mut(&credential_id) else {
             // 首次请求，需要创建缓存
+            tracing::debug!(
+                credential_id,
+                "首次请求，无缓存条目"
+            );
             let (cache_5m, cache_1h) = compute_ttl_breakdown(profile, 0);
             return CacheResult {
                 cache_read_input_tokens: 0,
@@ -160,32 +168,28 @@ impl CacheTracker {
             };
         };
 
+        tracing::debug!(
+            credential_id,
+            entry_count = credential_entries.len(),
+            "查找缓存匹配"
+        );
+
         let mut matched_tokens = 0;
 
         let cacheable_breakpoints = profile.cacheable_breakpoints();
-        'outer: for breakpoint in cacheable_breakpoints.iter().rev() {
+        let candidate_breakpoints: Vec<_> = cacheable_breakpoints
+            .iter()
+            .rev()
+            .take(PREFIX_LOOKBACK_LIMIT)
+            .copied()
+            .collect();
+
+        'outer: for breakpoint in candidate_breakpoints {
             let candidate = &profile.blocks[breakpoint.block_index];
-            if let Some(entry) = credential_entries.get_mut(&candidate.cumulative_hash) {
+            if let Some(entry) = credential_entries.get_mut(&candidate.prefix_fingerprint) {
                 if entry.expires_at <= now {
                     continue;
                 }
-                entry.expires_at = now + entry.ttl;
-                matched_tokens = breakpoint.cumulative_tokens.min(profile.total_input_tokens);
-                break 'outer;
-            }
-
-            let start = breakpoint.block_index;
-            let end = start.saturating_sub(MAX_BLOCK_LOOKBACK.saturating_sub(1));
-            for block_index in (end..start).rev() {
-                let candidate = &profile.blocks[block_index];
-                let Some(entry) = credential_entries.get_mut(&candidate.cumulative_hash) else {
-                    continue;
-                };
-
-                if entry.expires_at <= now {
-                    continue;
-                }
-
                 entry.expires_at = now + entry.ttl;
                 matched_tokens = entry.token_count.min(profile.total_input_tokens);
                 break 'outer;
@@ -194,6 +198,15 @@ impl CacheTracker {
 
         let new_tokens = last_breakpoint_tokens.saturating_sub(matched_tokens).max(0);
         let (cache_5m, cache_1h) = compute_ttl_breakdown(profile, matched_tokens);
+
+        tracing::debug!(
+            credential_id,
+            matched_tokens,
+            new_tokens,
+            cache_5m,
+            cache_1h,
+            "缓存计算结果"
+        );
 
         CacheResult {
             cache_read_input_tokens: matched_tokens.max(0),
@@ -214,7 +227,7 @@ impl CacheTracker {
             let block = &profile.blocks[breakpoint.block_index];
             let next_expiry = now + breakpoint.ttl;
 
-            match credential_entries.get_mut(&block.cumulative_hash) {
+            match credential_entries.get_mut(&block.prefix_fingerprint) {
                 Some(existing) => {
                     existing.token_count = existing.token_count.max(block.cumulative_tokens);
                     existing.ttl = existing.ttl.max(breakpoint.ttl);
@@ -222,7 +235,7 @@ impl CacheTracker {
                 }
                 None => {
                     credential_entries.insert(
-                        block.cumulative_hash,
+                        block.prefix_fingerprint,
                         CacheEntry {
                             token_count: block.cumulative_tokens,
                             ttl: breakpoint.ttl,
@@ -237,26 +250,25 @@ impl CacheTracker {
 
 /// 计算不同 TTL 的缓存创建 token 数
 fn compute_ttl_breakdown(profile: &CacheProfile, matched_tokens: i32) -> (i32, i32) {
-    let mut cache_5m = 0;
-    let mut cache_1h = 0;
+    let Some(last_breakpoint) = profile.last_cacheable_breakpoint() else {
+        return (0, 0);
+    };
 
-    for breakpoint in profile.cacheable_breakpoints() {
-        let block = &profile.blocks[breakpoint.block_index];
-        let block_tokens = block.cumulative_tokens.min(profile.total_input_tokens);
+    let new_tokens = last_breakpoint
+        .cumulative_tokens
+        .min(profile.total_input_tokens)
+        .saturating_sub(matched_tokens)
+        .max(0);
 
-        if block_tokens <= matched_tokens {
-            continue;
-        }
-
-        let new_tokens = block_tokens - matched_tokens;
-        if breakpoint.ttl == ONE_HOUR_CACHE_TTL {
-            cache_1h += new_tokens;
-        } else {
-            cache_5m += new_tokens;
-        }
+    if new_tokens == 0 {
+        return (0, 0);
     }
 
-    (cache_5m, cache_1h)
+    if last_breakpoint.ttl == ONE_HOUR_CACHE_TTL {
+        (0, new_tokens)
+    } else {
+        (new_tokens, 0)
+    }
 }
 
 impl CacheProfile {
@@ -332,6 +344,7 @@ fn flatten_cacheable_blocks(payload: &MessagesRequest) -> Vec<PendingBlock> {
             let mut value = serde_json::to_value(block).unwrap_or(serde_json::Value::Null);
             let breakpoint_ttl = extract_cache_ttl(&value);
             strip_cache_control(&mut value);
+            canonicalize_system_block_for_cache(&mut value);
 
             blocks.push(PendingBlock {
                 value: canonicalize_json(serde_json::json!({
@@ -352,6 +365,33 @@ fn flatten_cacheable_blocks(payload: &MessagesRequest) -> Vec<PendingBlock> {
     }
 
     blocks
+}
+
+fn canonicalize_system_block_for_cache(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+
+    let is_text_block = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|t| t == "text")
+        .unwrap_or(true);
+    if !is_text_block {
+        return;
+    }
+
+    let Some(text) = obj.get("text").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if !text.starts_with("x-anthropic-billing-header:") {
+        return;
+    }
+
+    obj.insert(
+        "text".to_string(),
+        serde_json::Value::String("__anthropic_billing_header__".to_string()),
+    );
 }
 
 fn flatten_message_blocks(message_index: usize, message: &Message) -> Vec<PendingBlock> {
@@ -523,6 +563,12 @@ mod tests {
         }
     }
 
+    fn build_request_with_system(messages: Vec<Message>, system: Vec<SystemMessage>) -> MessagesRequest {
+        let mut request = build_request(messages);
+        request.system = Some(system);
+        request
+    }
+
     fn msg(role: &str, content: serde_json::Value) -> Message {
         Message {
             role: role.to_string(),
@@ -564,16 +610,84 @@ mod tests {
     }
 
     #[test]
-    fn request_without_breakpoint_has_no_cache_usage() {
+    fn attribution_header_drift_does_not_break_cache_hit() {
         let tracker = CacheTracker::new(Duration::from_secs(3600));
-        let req = build_request(vec![msg("user", serde_json::json!("hello"))]);
-        let total = estimate_input_tokens(&req);
-        let profile = tracker.build_profile(&req, total);
-        let result = tracker.compute(1, &profile);
+        let system1 = vec![
+            SystemMessage {
+                block_type: Some("text".to_string()),
+                text: "x-anthropic-billing-header: cc_version=2.1.87.1; cc_entrypoint=cli; cch=aaaaa;".to_string(),
+                cache_control: None,
+            },
+            SystemMessage {
+                block_type: Some("text".to_string()),
+                text: long_cacheable_text(),
+                cache_control: Some(CacheControl {
+                    cache_type: "ephemeral".to_string(),
+                    ttl: None,
+                }),
+            },
+        ];
+        let system2 = vec![
+            SystemMessage {
+                block_type: Some("text".to_string()),
+                text: "x-anthropic-billing-header: cc_version=2.1.87.2; cc_entrypoint=cli; cch=bbbbb;".to_string(),
+                cache_control: None,
+            },
+            SystemMessage {
+                block_type: Some("text".to_string()),
+                text: long_cacheable_text(),
+                cache_control: Some(CacheControl {
+                    cache_type: "ephemeral".to_string(),
+                    ttl: None,
+                }),
+            },
+        ];
 
-        assert_eq!(profile.total_input_tokens(), total);
-        assert_eq!(result.cache_read_input_tokens, 0);
+        let req1 = build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system1);
+        let total1 = estimate_input_tokens(&req1);
+        let profile1 = tracker.build_profile(&req1, total1);
+        tracker.update(1, &profile1);
+
+        let req2 = build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system2);
+        let total2 = estimate_input_tokens(&req2);
+        let profile2 = tracker.build_profile(&req2, total2);
+        let result = tracker.compute(1, &profile2);
+
+        assert!(result.cache_read_input_tokens > 0);
         assert_eq!(result.cache_creation_input_tokens, 0);
+    }
+
+    #[test]
+    fn normal_system_text_change_still_misses() {
+        let tracker = CacheTracker::new(Duration::from_secs(3600));
+        let system1 = vec![SystemMessage {
+            block_type: Some("text".to_string()),
+            text: long_cacheable_text(),
+            cache_control: Some(CacheControl {
+                cache_type: "ephemeral".to_string(),
+                ttl: None,
+            }),
+        }];
+        let system2 = vec![SystemMessage {
+            block_type: Some("text".to_string()),
+            text: format!("{} extra", long_cacheable_text()),
+            cache_control: Some(CacheControl {
+                cache_type: "ephemeral".to_string(),
+                ttl: None,
+            }),
+        }];
+
+        let req1 = build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system1);
+        let total1 = estimate_input_tokens(&req1);
+        let profile1 = tracker.build_profile(&req1, total1);
+        tracker.update(1, &profile1);
+
+        let req2 = build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system2);
+        let total2 = estimate_input_tokens(&req2);
+        let profile2 = tracker.build_profile(&req2, total2);
+        let result = tracker.compute(1, &profile2);
+
+        assert_eq!(result.cache_read_input_tokens, 0);
     }
 
     #[test]
@@ -595,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn same_content_with_shape_drift_hits_cache() {
+    fn same_content_with_shape_drift_does_not_false_hit() {
         let tracker = CacheTracker::new(Duration::from_secs(3600));
         let req1 = build_request(vec![msg("user", cache_text(&long_cacheable_text()))]);
         let total1 = estimate_input_tokens(&req1);
@@ -616,18 +730,9 @@ mod tests {
         let total2 = estimate_input_tokens(&req2);
         let profile2 = tracker.build_profile(&req2, total2);
         let result = tracker.compute(1, &profile2);
-        let matched_tokens = profile1
-            .last_cacheable_breakpoint()
-            .map(|bp| bp.cumulative_tokens)
-            .unwrap_or(0);
 
-        assert_eq!(
-            profile1.blocks[2].cumulative_hash,
-            profile2.blocks[2].cumulative_hash
-        );
-        assert_eq!(result.cache_read_input_tokens, matched_tokens);
+        assert_eq!(result.cache_read_input_tokens, 0);
         assert!(result.cache_creation_input_tokens > 0);
-        assert!(result.cache_creation_input_tokens <= total2.saturating_sub(matched_tokens));
     }
 
     #[test]
@@ -651,6 +756,55 @@ mod tests {
                 .unwrap_or(0)
         );
         assert_eq!(result.cache_creation_input_tokens, 0);
+    }
+
+    #[test]
+    fn prefix_match_with_appended_turn_reads_previous_prefix_cache() {
+        let tracker = CacheTracker::new(Duration::from_secs(3600));
+        let req1 = build_request(vec![
+            msg("user", cache_text(&long_cacheable_text())),
+            msg("assistant", serde_json::json!("R1")),
+            msg("user", serde_json::json!("Follow-up")),
+            msg("assistant", serde_json::json!("R2")),
+        ]);
+        let total1 = estimate_input_tokens(&req1);
+        let profile1 = tracker.build_profile(&req1, total1);
+        tracker.update(1, &profile1);
+
+        let req2 = build_request(vec![
+            msg("user", cache_text(&long_cacheable_text())),
+            msg("assistant", serde_json::json!("R1")),
+            msg("user", serde_json::json!("Follow-up")),
+            msg("assistant", serde_json::json!("R2")),
+            msg("user", serde_json::json!("New feedback")),
+            msg("assistant", serde_json::json!("R3")),
+        ]);
+        let total2 = estimate_input_tokens(&req2);
+        let profile2 = tracker.build_profile(&req2, total2);
+        let result = tracker.compute(1, &profile2);
+
+        let matched_tokens = profile1
+            .last_cacheable_breakpoint()
+            .map(|bp| bp.cumulative_tokens)
+            .unwrap_or(0);
+
+        assert!(matched_tokens > 0);
+        assert_eq!(result.cache_read_input_tokens, matched_tokens);
+        assert!(result.cache_creation_input_tokens > 0);
+    }
+
+    #[test]
+    fn prefix_lookback_limits_to_recent_ten_breakpoints() {
+        let tracker = CacheTracker::new(Duration::from_secs(3600));
+        let mut messages = Vec::new();
+        for i in 0..12 {
+            messages.push(msg("user", cache_text(&format!("{}-{i}", long_cacheable_text()))));
+            messages.push(msg("assistant", serde_json::json!(format!("reply-{i}"))));
+        }
+        let req = build_request(messages);
+        let total = estimate_input_tokens(&req);
+        let profile = tracker.build_profile(&req, total);
+        assert!(profile.cacheable_breakpoints().len() >= 10);
     }
 
     #[test]

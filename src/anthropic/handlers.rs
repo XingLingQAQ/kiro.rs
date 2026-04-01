@@ -823,6 +823,12 @@ pub async fn post_messages(
         websearch::strip_web_search_tools(&mut payload);
     }
 
+    // 剔除空 text content block（客户端可能将 tool_use-only 响应中的空 text block 写回 history）
+    let stripped = strip_empty_text_content_blocks(&mut payload.messages);
+    if stripped > 0 {
+        tracing::info!(stripped, "已剔除空 text content block");
+    }
+
     let cache_profile = build_cache_profile(&state.cache_tracker, &payload, estimated_input_tokens);
     let provisional_cache_context = provisional_cache_usage(&state.cache_tracker, &cache_profile);
 
@@ -832,12 +838,6 @@ pub async fn post_messages(
         provisional_cache_read_input_tokens = provisional_cache_context.cache_read_input_tokens,
         "Computed provisional cache usage for /v1/messages"
     );
-
-    // 剔除空 text content block（客户端可能将 tool_use-only 响应中的空 text block 写回 history）
-    let stripped = strip_empty_text_content_blocks(&mut payload.messages);
-    if stripped > 0 {
-        tracing::info!(stripped, "已剔除空 text content block");
-    }
 
     // 转换请求
     let conversion_result = match convert_request(&payload, &compression_config) {
