@@ -155,10 +155,7 @@ impl CacheTracker {
 
         let Some(credential_entries) = entries.by_credential.get_mut(&credential_id) else {
             // 首次请求，需要创建缓存
-            tracing::debug!(
-                credential_id,
-                "首次请求，无缓存条目"
-            );
+            tracing::debug!(credential_id, "首次请求，无缓存条目");
             let (cache_5m, cache_1h) = compute_ttl_breakdown(profile, 0);
             return CacheResult {
                 cache_read_input_tokens: 0,
@@ -563,7 +560,10 @@ mod tests {
         }
     }
 
-    fn build_request_with_system(messages: Vec<Message>, system: Vec<SystemMessage>) -> MessagesRequest {
+    fn build_request_with_system(
+        messages: Vec<Message>,
+        system: Vec<SystemMessage>,
+    ) -> MessagesRequest {
         let mut request = build_request(messages);
         request.system = Some(system);
         request
@@ -615,7 +615,9 @@ mod tests {
         let system1 = vec![
             SystemMessage {
                 block_type: Some("text".to_string()),
-                text: "x-anthropic-billing-header: cc_version=2.1.87.1; cc_entrypoint=cli; cch=aaaaa;".to_string(),
+                text:
+                    "x-anthropic-billing-header: cc_version=2.1.87.1; cc_entrypoint=cli; cch=aaaaa;"
+                        .to_string(),
                 cache_control: None,
             },
             SystemMessage {
@@ -643,12 +645,14 @@ mod tests {
             },
         ];
 
-        let req1 = build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system1);
+        let req1 =
+            build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system1);
         let total1 = estimate_input_tokens(&req1);
         let profile1 = tracker.build_profile(&req1, total1);
         tracker.update(1, &profile1);
 
-        let req2 = build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system2);
+        let req2 =
+            build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system2);
         let total2 = estimate_input_tokens(&req2);
         let profile2 = tracker.build_profile(&req2, total2);
         let result = tracker.compute(1, &profile2);
@@ -683,12 +687,14 @@ mod tests {
             }),
         }];
 
-        let req1 = build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system1);
+        let req1 =
+            build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system1);
         let total1 = estimate_input_tokens(&req1);
         let profile1 = tracker.build_profile(&req1, total1);
         tracker.update(1, &profile1);
 
-        let req2 = build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system2);
+        let req2 =
+            build_request_with_system(vec![msg("user", serde_json::json!("hello"))], system2);
         let total2 = estimate_input_tokens(&req2);
         let profile2 = tracker.build_profile(&req2, total2);
         let result = tracker.compute(1, &profile2);
@@ -804,7 +810,10 @@ mod tests {
         let tracker = CacheTracker::new(Duration::from_secs(3600));
         let mut messages = Vec::new();
         for i in 0..12 {
-            messages.push(msg("user", cache_text(&format!("{}-{i}", long_cacheable_text()))));
+            messages.push(msg(
+                "user",
+                cache_text(&format!("{}-{i}", long_cacheable_text())),
+            ));
             messages.push(msg("assistant", serde_json::json!(format!("reply-{i}"))));
         }
         let req = build_request(messages);

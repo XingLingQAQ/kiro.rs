@@ -1293,9 +1293,18 @@ mod tests {
             .expect("message_delta should exist");
 
         assert_eq!(message_delta_usage["cache_read_input_tokens"], json!(800));
-        assert_eq!(message_delta_usage["cache_creation_input_tokens"], json!(50));
-        assert_eq!(message_delta_usage["cache_creation"]["ephemeral_5m_input_tokens"], json!(30));
-        assert_eq!(message_delta_usage["cache_creation"]["ephemeral_1h_input_tokens"], json!(20));
+        assert_eq!(
+            message_delta_usage["cache_creation_input_tokens"],
+            json!(50)
+        );
+        assert_eq!(
+            message_delta_usage["cache_creation"]["ephemeral_5m_input_tokens"],
+            json!(30)
+        );
+        assert_eq!(
+            message_delta_usage["cache_creation"]["ephemeral_1h_input_tokens"],
+            json!(20)
+        );
         assert_eq!(message_delta_usage["input_tokens"], json!(150));
     }
 
