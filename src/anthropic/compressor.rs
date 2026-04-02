@@ -567,19 +567,26 @@ fn repair_tool_pairing_pass(state: &mut ConversationState) -> (usize, usize) {
 
 /// 修复空 content 字段（压缩后最终兜底）。
 ///
-/// 规则：若 content 为空或全空白，则统一替换为 "."。
+/// 规则：仅在必要时替换为 "."，优先保留真实结构。
 /// 处理范围：
-/// - history user_input_message.content
-/// - history assistant_response_message.content
-/// - current_message.user_input_message.content
-/// - history/current tool_result content 数组中 text 字段为空字符串的条目
+/// - history user_input_message.content（仅当无 images/tool_results 时兜底）
+/// - history assistant_response_message.content（仅当无 tool_uses 时兜底）
+/// - current_message.user_input_message.content（最终必要兜底）
+/// - history/current tool_result content 数组中空 text 项（优先删除，必要时兜底）
 fn repair_non_empty_content_pass(state: &mut ConversationState) -> usize {
     let mut repaired = 0usize;
 
     for msg in &mut state.history {
         match msg {
             Message::User(user_msg) => {
-                if repair_content_field(&mut user_msg.user_input_message.content) {
+                // 仅当既无图片也无 tool_results 时才兜底空 content
+                let has_payload = !user_msg.user_input_message.images.is_empty()
+                    || !user_msg
+                        .user_input_message
+                        .user_input_message_context
+                        .tool_results
+                        .is_empty();
+                if !has_payload && repair_content_field(&mut user_msg.user_input_message.content) {
                     repaired += 1;
                 }
                 repaired += repair_tool_result_text_fields(
@@ -595,7 +602,7 @@ fn repair_non_empty_content_pass(state: &mut ConversationState) -> usize {
                     .assistant_response_message
                     .tool_uses
                     .as_ref()
-                    .map_or(false, |tools| !tools.is_empty());
+                    .is_some_and(|tools| !tools.is_empty());
 
                 if !has_tool_uses
                     && repair_content_field(&mut assistant_msg.assistant_response_message.content)
@@ -606,7 +613,17 @@ fn repair_non_empty_content_pass(state: &mut ConversationState) -> usize {
         }
     }
 
-    if repair_content_field(&mut state.current_message.user_input_message.content) {
+    // current_message 仅在没有任何非文本载荷时才做最终兜底
+    let current_has_payload = !state.current_message.user_input_message.images.is_empty()
+        || !state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tool_results
+            .is_empty();
+    if !current_has_payload
+        && repair_content_field(&mut state.current_message.user_input_message.content)
+    {
         repaired += 1;
     }
     repaired += repair_tool_result_text_fields(
@@ -620,19 +637,35 @@ fn repair_non_empty_content_pass(state: &mut ConversationState) -> usize {
     repaired
 }
 
-/// 修复 tool_result content 数组中 text 字段为空字符串的条目，替换为 "."。
+/// 修复 tool_result content 数组中 text 字段为空字符串的条目。
+/// 策略：优先删除空 text 项；若删除后 content 变空数组则兜底补 "."。
 fn repair_tool_result_text_fields(
     results: &mut [crate::kiro::model::requests::tool::ToolResult],
 ) -> usize {
     let mut repaired = 0usize;
     for result in results.iter_mut() {
-        for map in result.content.iter_mut() {
-            if let Some(serde_json::Value::String(text)) = map.get_mut("text")
-                && text.trim().is_empty()
-            {
-                *text = ".".to_string();
-                repaired += 1;
+        // 先删除所有空 text 项
+        let original_len = result.content.len();
+        result.content.retain(|map| {
+            if let Some(serde_json::Value::String(text)) = map.get("text") {
+                !text.trim().is_empty()
+            } else {
+                true
             }
+        });
+        let removed = original_len - result.content.len();
+
+        // 若删除后 content 变空，兜底补一个 "." text 项
+        if result.content.is_empty() {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "text".to_string(),
+                serde_json::Value::String(".".to_string()),
+            );
+            result.content.push(map);
+            repaired += 1;
+        } else if removed > 0 {
+            repaired += removed;
         }
     }
     repaired
@@ -1300,7 +1333,7 @@ mod tests {
 
     #[test]
     fn test_repair_tool_result_empty_text_in_history() {
-        // tool_result content[*].text 为空字符串时，应被修复为 "."
+        // tool_result content[*].text 为空字符串时，若删除后无内容，应兜底为 "."
         let mut map = serde_json::Map::new();
         map.insert(
             "text".to_string(),
@@ -1340,7 +1373,7 @@ mod tests {
                 u.user_input_message.user_input_message_context.tool_results[0].content[0]["text"]
                     .as_str()
                     .unwrap();
-            assert_eq!(text, ".", "空 text 应被修复为 '.'");
+            assert_eq!(text, ".", "删除空 text 后无内容时应兜底为 '.'");
         } else {
             panic!("expected User message");
         }
@@ -1348,7 +1381,7 @@ mod tests {
 
     #[test]
     fn test_repair_tool_result_empty_text_in_current() {
-        // current_message tool_result content[*].text 为空字符串时，应被修复为 "."
+        // current_message tool_result content[*].text 为空字符串时，若删除后无内容，应兜底为 "."
         let mut map = serde_json::Map::new();
         map.insert(
             "text".to_string(),
@@ -1385,7 +1418,7 @@ mod tests {
             .content[0]["text"]
             .as_str()
             .unwrap();
-        assert_eq!(text, ".", "current_message 中空 text 应被修复为 '.'");
+        assert_eq!(text, ".", "删除空 text 后无内容时应兜底为 '.'");
     }
 
     #[test]
@@ -1434,6 +1467,52 @@ mod tests {
         } else {
             panic!("expected User message");
         }
+    }
+
+    #[test]
+    fn test_repair_tool_result_mixed_empty_and_nonempty_text_keeps_nonempty_only() {
+        let mut empty_map = serde_json::Map::new();
+        empty_map.insert(
+            "text".to_string(),
+            serde_json::Value::String("   ".to_string()),
+        );
+
+        let mut nonempty_map = serde_json::Map::new();
+        nonempty_map.insert(
+            "text".to_string(),
+            serde_json::Value::String("hello".to_string()),
+        );
+
+        let tool_result = ToolResult {
+            tool_use_id: "t5".to_string(),
+            content: vec![empty_map, nonempty_map],
+            status: Some("success".to_string()),
+            is_error: false,
+        };
+
+        let tool_use = ToolUseEntry::new("t5", "echo");
+        let assistant_msg = Message::Assistant(HistoryAssistantMessage {
+            assistant_response_message: AssistantMessage::new("ok").with_tool_uses(vec![tool_use]),
+        });
+
+        let current = UserInputMessage::new("result here", "claude-sonnet-4.5")
+            .with_context(UserInputMessageContext::new().with_tool_results(vec![tool_result]));
+
+        let mut state = ConversationState::new("test")
+            .with_current_message(CurrentMessage::new(current))
+            .with_history(vec![assistant_msg]);
+
+        let config = CompressionConfig::default();
+        let _stats = compress(&mut state, &config);
+
+        let content = &state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tool_results[0]
+            .content;
+        assert_eq!(content.len(), 1, "应删除空 text 项，仅保留非空项");
+        assert_eq!(content[0]["text"].as_str().unwrap(), "hello");
     }
 
     #[test]

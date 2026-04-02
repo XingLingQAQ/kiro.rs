@@ -3,6 +3,7 @@
 ## [v1.1.15] - 2026-04-01
 
 ### Fixed
+- **减少向下游发送人为 "." 占位符** — 调整 Anthropic→Kiro 转换与压缩末尾修复：history/assistant 的 tool-only / 非文本载荷场景优先保留真实结构，不再在早期转换阶段统一补 `"."`；`tool_result.content[*].text` 空项改为优先删除，仅在删除后会变成空内容时才最小兜底，降低伪文本进入下游的概率，同时保留既有 400 防线 (`src/anthropic/converter.rs`, `src/anthropic/compressor.rs`)
 - **Prompt Cache 前缀命中与归一化修复** — `cache_tracker` 改为基于前缀指纹匹配最近断点，避免不同消息形态产生误命中；同时将 `x-anthropic-billing-header` 归一化，确保计费头漂移不破坏缓存复用；`/v1/messages` 在 provisional cache 计算前先剔除空 text block，避免 tool_use-only 历史污染缓存指纹 (`src/anthropic/cache_tracker.rs`, `src/anthropic/handlers.rs`)
 
 ## [v1.1.14] - 2026-03-31

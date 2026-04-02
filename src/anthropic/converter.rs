@@ -122,10 +122,10 @@ You are an autonomous coding agent. Follow these principles:\n\
 8. Prefer making changes directly over explaining what you would do.";
 
 fn non_empty_content_or_space(content: String, has_non_text_payload: bool) -> String {
-    // Kiro 上游在部分场景下会拒绝空 content（例如仅 tool_result / 仅 image 的消息）。
-    // 使用最小占位符可保持语义，同时规避 400 Improperly formed request。
-    if has_non_text_payload && content.trim().is_empty() {
-        return ".".to_string();
+    // 尽量保留真实结构，不在早期转换阶段为非文本载荷主动补 "."。
+    // 含非文本载荷时保留原始文本，最终是否需要兜底由调用方决定。
+    if has_non_text_payload {
+        return content;
     }
     content
 }
@@ -457,14 +457,14 @@ pub fn convert_request(
 
     // 12. 构建当前消息
     // 保留文本内容，即使有工具结果也不丢弃用户文本
-    let mut content =
-        non_empty_content_or_space(text_content, !images.is_empty() || has_tool_results);
-    // tool_result 可能在配对校验阶段被过滤，导致当前消息最终变成空字符串。
-    // 上游会拒绝空 content（400 Improperly formed request），因此这里做最终兜底。
-    if content.trim().is_empty() {
+    let content = non_empty_content_or_space(text_content, !images.is_empty() || has_tool_results);
+    // current_message 是请求主体，必须保留；若文本为空且无非文本载荷，最终兜底
+    let content = if content.trim().is_empty() && images.is_empty() && !has_tool_results {
         tracing::warn!("currentMessage content 为空，已使用占位符修复");
-        content = ".".to_string();
-    }
+        ".".to_string()
+    } else {
+        content
+    };
 
     let mut user_input = UserInputMessage::new(content, &model_id)
         .with_context(context)
@@ -1204,9 +1204,10 @@ fn merge_user_messages(
         content_parts.join("\n"),
         !all_images.is_empty() || !all_tool_results.is_empty(),
     );
-    // 图片被 budget 裁剪后可能导致 content 为空（原消息仅含图片无文本），
-    // 上游会拒绝空 content（400 Improperly formed request），此处做最终兜底。
-    let content = if content.trim().is_empty() {
+    // 历史 user 消息尽量避免主动补 "."：
+    // 若只有非文本载荷，则保留空字符串让真实结构(images/tool_results)表达语义；
+    // 仅纯文本且被压成空白时才做最终兜底，避免空 content 直发下游。
+    let content = if content.trim().is_empty() && all_images.is_empty() && all_tool_results.is_empty() {
         ".".to_string()
     } else {
         content
@@ -1334,7 +1335,6 @@ fn convert_assistant_message(
 
     // 组合 thinking 和 text 内容
     // 格式: <thinking>思考内容</thinking>\n\ntext内容
-    // 注意: Kiro API 要求 content 字段不能为空，当只有 tool_use 时需要占位符
     let final_content = if !thinking_content.is_empty() {
         if !text_content.is_empty() {
             format!(
@@ -1344,8 +1344,6 @@ fn convert_assistant_message(
         } else {
             format!("<thinking>{}</thinking>", thinking_content)
         }
-    } else if text_content.is_empty() && !tool_uses.is_empty() {
-        ".".to_string()
     } else {
         text_content
     };
@@ -1384,8 +1382,8 @@ fn merge_assistant_messages(
         }
     }
 
-    let content = if content_parts.is_empty() && !all_tool_uses.is_empty() {
-        ".".to_string()
+    let content = if content_parts.is_empty() {
+        String::new()
     } else {
         content_parts.join("\n\n")
     };
@@ -1943,7 +1941,7 @@ mod tests {
         use super::super::types::Message as AnthropicMessage;
 
         // 测试仅包含 tool_use 的 assistant 消息（无 text 块）
-        // Kiro API 要求 content 字段不能为空
+        // 转换阶段应保留结构化 tool_uses，不主动补 "." 占位符
         let msg = AnthropicMessage {
             role: "assistant".to_string(),
             content: serde_json::json!([
@@ -1953,14 +1951,9 @@ mod tests {
 
         let result = convert_assistant_message(&msg).expect("应该成功转换");
 
-        // 验证 content 不为空（使用占位符）
         assert!(
-            !result.assistant_response_message.content.is_empty(),
-            "content 不应为空"
-        );
-        assert_eq!(
-            result.assistant_response_message.content, ".",
-            "仅 tool_use 时应使用 '.' 占位符"
+            result.assistant_response_message.content.is_empty(),
+            "仅 tool_use 时转换阶段不应主动补 '.'"
         );
 
         // 验证 tool_uses 被正确保留
@@ -2248,10 +2241,9 @@ mod tests {
             .content;
 
         assert!(
-            !content.is_empty(),
-            "仅 tool_result 的 user 消息应使用占位符避免空 content"
+            content.is_empty(),
+            "仅有效 tool_result 的 current user 消息不应在早期转换阶段补 '.'"
         );
-        assert_eq!(content, ".");
     }
 
     #[test]
@@ -2310,10 +2302,9 @@ mod tests {
             }
             found = true;
             assert!(
-                !user_msg.user_input_message.content.is_empty(),
-                "history 中的 tool_result user 消息也需要占位符"
+                user_msg.user_input_message.content.is_empty(),
+                "history 中仅含有效 tool_result 的 user 消息不应在早期转换阶段补 '.'"
             );
-            assert_eq!(user_msg.user_input_message.content, ".");
         }
         assert!(found, "测试数据应在 history 中包含 tool_results");
     }
@@ -3043,7 +3034,7 @@ mod tests {
 
     #[test]
     fn test_merge_assistant_messages_only_tool_use() {
-        // 测试合并后只有 tool_use 时，content 使用占位符
+        // 测试合并后只有 tool_use 时，不主动补占位符
         use super::super::types::Message as AnthropicMessage;
 
         let msg1 = AnthropicMessage {
@@ -3063,10 +3054,9 @@ mod tests {
         let messages: Vec<&AnthropicMessage> = vec![&msg1, &msg2];
         let result = merge_assistant_messages(&messages).expect("合并应成功");
 
-        // content 应为占位符（因为所有 text 都是空白）
-        assert_eq!(
-            result.assistant_response_message.content, ".",
-            "仅 tool_use 时应使用占位符"
+        assert!(
+            result.assistant_response_message.content.is_empty(),
+            "仅 tool_use 时合并阶段不应主动补 '.'"
         );
     }
 }
