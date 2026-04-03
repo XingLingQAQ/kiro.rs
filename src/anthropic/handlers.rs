@@ -56,6 +56,7 @@ struct StreamRequestContext<'a> {
     model: &'a str,
     input_tokens: i32,
     thinking_enabled: bool,
+    tool_name_map: std::collections::HashMap<String, String>,
     user_id: Option<&'a str>,
 }
 
@@ -289,12 +290,16 @@ fn adaptive_shrink_request_body(
         });
 
     // 是否存在历史图片（否则无需尝试图片降级）
-    let has_history_images = kiro_request.conversation_state.history.iter().any(|msg| match msg {
-        crate::kiro::model::requests::conversation::Message::User(u) => {
-            !u.user_input_message.images.is_empty()
-        }
-        _ => false,
-    });
+    let has_history_images = kiro_request
+        .conversation_state
+        .history
+        .iter()
+        .any(|msg| match msg {
+            crate::kiro::model::requests::conversation::Message::User(u) => {
+                !u.user_input_message.images.is_empty()
+            }
+            _ => false,
+        });
 
     // 扫描所有用户消息，找到最大 content 字符数作为初始 message_content_max_chars
     let max_content_chars = {
@@ -896,6 +901,7 @@ pub async fn post_messages(
     }
 
     // 构建 Kiro 请求
+    let tool_name_map = conversion_result.tool_name_map;
     let mut kiro_request = KiroRequest {
         conversation_state: conversion_result.conversation_state,
         profile_arn: state.profile_arn.clone(),
@@ -1009,6 +1015,7 @@ pub async fn post_messages(
             model: &payload.model,
             input_tokens: estimated_input_tokens,
             thinking_enabled,
+            tool_name_map: tool_name_map.clone(),
             user_id: user_id.as_deref(),
         };
         handle_stream_request(provider, stream_request).await
@@ -1019,6 +1026,7 @@ pub async fn post_messages(
             &request_body,
             &payload.model,
             estimated_input_tokens,
+            tool_name_map,
             user_id.as_deref(),
             Some(&state.cache_tracker),
             Some(&cache_profile),
@@ -1061,6 +1069,7 @@ async fn handle_stream_request(
         final_cache_context.cache_creation_input_tokens,
         final_cache_context.cache_read_input_tokens,
         context.thinking_enabled,
+        context.tool_name_map,
     );
     ctx.cache_creation_5m_input_tokens = final_cache_context.cache_creation_5m_input_tokens;
     ctx.cache_creation_1h_input_tokens = final_cache_context.cache_creation_1h_input_tokens;
@@ -1189,6 +1198,7 @@ async fn handle_non_stream_request(
     request_body: &str,
     model: &str,
     input_tokens: i32,
+    tool_name_map: std::collections::HashMap<String, String>,
     user_id: Option<&str>,
     cache_tracker: Option<&std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>>,
     cache_profile: Option<&crate::anthropic::cache_tracker::CacheProfile>,
@@ -1315,10 +1325,15 @@ async fn handle_non_stream_request(
                                 // 释放已完成的 buffer，避免请求处理期间内存重复占用
                                 tool_json_buffers.remove(&tool_use.tool_use_id);
 
+                                let original_name = tool_name_map
+                                    .get(&tool_use.name)
+                                    .cloned()
+                                    .unwrap_or_else(|| tool_use.name.clone());
+
                                 tool_uses.push(json!({
                                     "type": "tool_use",
                                     "id": tool_use.tool_use_id,
-                                    "name": tool_use.name,
+                                    "name": original_name,
                                     "input": input
                                 }));
                             }
@@ -1831,9 +1846,8 @@ mod tests {
         let mut kiro_request = KiroRequest {
             conversation_state: ConversationState::new("conv-1")
                 .with_current_message(CurrentMessage::new(
-                    UserInputMessage::new("current", "model").with_images(vec![
-                        KiroImage::from_base64("png", big.clone()),
-                    ]),
+                    UserInputMessage::new("current", "model")
+                        .with_images(vec![KiroImage::from_base64("png", big.clone())]),
                 ))
                 .with_history(vec![KiroMessage::user("history", "model")]),
             profile_arn: None,
@@ -1846,7 +1860,12 @@ mod tests {
 
         assert_eq!(removed, 1);
         assert_eq!(
-            kiro_request.conversation_state.current_message.user_input_message.images.len(),
+            kiro_request
+                .conversation_state
+                .current_message
+                .user_input_message
+                .images
+                .len(),
             1
         );
         assert!(match &kiro_request.conversation_state.history[0] {

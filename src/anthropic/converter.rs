@@ -2,6 +2,9 @@
 //!
 //! 负责将 Anthropic API 请求格式转换为 Kiro API 请求格式
 
+use std::collections::HashMap;
+
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::image::{process_gif_frames, process_image, process_image_to_format};
@@ -196,6 +199,8 @@ pub struct ConversionResult {
     pub conversation_state: ConversationState,
     /// 压缩统计信息（仅在启用压缩时有值）
     pub compression_stats: Option<CompressionStats>,
+    /// 工具名称映射（短名称 → 原始名称），仅当存在超长工具名时非空
+    pub tool_name_map: HashMap<String, String>,
 }
 
 /// 转换错误
@@ -220,23 +225,66 @@ impl std::error::Error for ConversionError {}
 
 /// 从 metadata.user_id 中提取 session UUID
 ///
-/// user_id 格式: user_xxx_account__session_0b4445e1-f5be-49e1-87ce-62bbc28ad705
-/// 提取 session_ 后面的 UUID 作为 conversationId
+/// 支持两种格式：
+/// 1. 字符串格式: user_xxx_account__session_0b4445e1-f5be-49e1-87ce-62bbc28ad705
+/// 2. JSON 格式: {"device_id":"...","account_uuid":"...","session_id":"UUID"}
+///
+/// 提取 session UUID 作为 conversationId
 fn extract_session_id(user_id: &str) -> Option<String> {
-    // 查找 "session_" 后面的内容
+    // 先尝试 JSON 格式解析
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(user_id) {
+        if let Some(session_id) = json.get("session_id").and_then(|v| v.as_str()) {
+            if is_valid_uuid(session_id) {
+                return Some(session_id.to_string());
+            }
+        }
+    }
+
+    // 再尝试字符串格式：查找 "session_" 后面的内容
     if let Some(pos) = user_id.find("session_") {
         let session_part = &user_id[pos + 8..]; // "session_" 长度为 8
         // session_part 应该是 UUID 格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
         // 验证是否是有效的 UUID 格式（36 字符，包含 4 个连字符）
         if session_part.len() >= 36 {
             let uuid_str = &session_part[..36];
-            // 简单验证 UUID 格式
-            if uuid_str.chars().filter(|c| *c == '-').count() == 4 {
+            if is_valid_uuid(uuid_str) {
                 return Some(uuid_str.to_string());
             }
         }
     }
     None
+}
+
+/// 简单验证 UUID 格式（36 字符，包含 4 个连字符）
+fn is_valid_uuid(s: &str) -> bool {
+    s.len() == 36 && s.chars().filter(|c| *c == '-').count() == 4
+}
+
+/// Kiro API 工具名称最大长度限制
+const TOOL_NAME_MAX_LEN: usize = 63;
+
+/// 生成确定性短名称：截断前缀 + "_" + 8 位 SHA256 hex
+fn shorten_tool_name(name: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_bytes());
+    let hash_hex = format!("{:x}", hasher.finalize());
+    let hash_suffix = &hash_hex[..8];
+    let prefix_max = TOOL_NAME_MAX_LEN - 1 - 8;
+    let prefix = match name.char_indices().nth(prefix_max) {
+        Some((idx, _)) => &name[..idx],
+        None => name,
+    };
+    format!("{}_{}", prefix, hash_suffix)
+}
+
+/// 如果名称超长则缩短，并记录映射（short → original）
+fn map_tool_name(name: &str, tool_name_map: &mut HashMap<String, String>) -> String {
+    if name.len() <= TOOL_NAME_MAX_LEN {
+        return name.to_string();
+    }
+    let short = shorten_tool_name(name);
+    tool_name_map.insert(short.clone(), name.to_string());
+    short
 }
 
 /// 收集历史消息中使用的所有工具名称（小写去重）
@@ -368,8 +416,13 @@ pub fn convert_request(
         &mut remaining_image_budget,
     )?;
 
-    // 6. 转换工具定义
-    let mut tools = convert_tools(&req.tools, compression_config.tool_description_max_chars);
+    // 6. 转换工具定义（超长名称自动缩短并记录映射）
+    let mut tool_name_map = HashMap::new();
+    let mut tools = convert_tools(
+        &req.tools,
+        compression_config.tool_description_max_chars,
+        &mut tool_name_map,
+    );
 
     // 7. 构建历史消息（需要先构建，以便收集历史中使用的工具）
     // history 使用 currentMessage 消耗后的剩余图片配额
@@ -381,6 +434,7 @@ pub fn convert_request(
         total_image_count,
         is_agentic_model(&req.model),
         &mut remaining_image_budget,
+        &mut tool_name_map,
     )?;
 
     // 8. 验证并过滤 tool_use/tool_result 配对
@@ -510,9 +564,14 @@ pub fn convert_request(
         None
     };
 
+    if !tool_name_map.is_empty() {
+        tracing::info!("工具名称映射: {} 个超长名称已缩短", tool_name_map.len());
+    }
+
     Ok(ConversionResult {
         conversation_state,
         compression_stats,
+        tool_name_map,
     })
 }
 
@@ -884,6 +943,7 @@ fn remove_orphaned_tool_uses(
 fn convert_tools(
     tools: &Option<Vec<AnthropicTool>>,
     max_description_chars: usize,
+    tool_name_map: &mut HashMap<String, String>,
 ) -> Vec<KiroTool> {
     let Some(tools) = tools else {
         return Vec::new();
@@ -900,16 +960,6 @@ fn convert_tools(
                 .is_some_and(|ty| ty.starts_with("web_search"));
             if dominated {
                 tracing::debug!("过滤不支持的工具: name={}, type={:?}", t.name, t.tool_type);
-            }
-
-            // 过滤掉 name 超过 64 字符的工具（上游硬限制）
-            if t.name.len() > 64 {
-                tracing::warn!(
-                    "过滤工具名过长的工具: name={} ({}字符，上限64)",
-                    t.name,
-                    t.name.len()
-                );
-                return false;
             }
 
             !dominated
@@ -946,7 +996,7 @@ fn convert_tools(
 
             KiroTool {
                 tool_specification: ToolSpecification {
-                    name: t.name.clone(),
+                    name: map_tool_name(&t.name, tool_name_map),
                     description,
                     input_schema: InputSchema::from_json(schema),
                 },
@@ -1008,6 +1058,7 @@ fn build_history(
     total_image_count: usize,
     is_agentic: bool,
     remaining_image_budget: &mut usize,
+    tool_name_map: &mut HashMap<String, String>,
 ) -> Result<Vec<Message>, ConversionError> {
     let mut history = Vec::new();
 
@@ -1091,7 +1142,7 @@ fn build_history(
         if msg.role == "user" {
             // 先处理累积的 assistant 消息
             if !assistant_buffer.is_empty() {
-                let merged = merge_assistant_messages(&assistant_buffer)?;
+                let merged = merge_assistant_messages(&assistant_buffer, tool_name_map)?;
                 history.push(Message::Assistant(merged));
                 assistant_buffer.clear();
             }
@@ -1116,7 +1167,7 @@ fn build_history(
 
     // 处理末尾累积的 assistant 消息
     if !assistant_buffer.is_empty() {
-        let merged = merge_assistant_messages(&assistant_buffer)?;
+        let merged = merge_assistant_messages(&assistant_buffer, tool_name_map)?;
         history.push(Message::Assistant(merged));
     }
 
@@ -1207,11 +1258,12 @@ fn merge_user_messages(
     // 历史 user 消息尽量避免主动补 "."：
     // 若只有非文本载荷，则保留空字符串让真实结构(images/tool_results)表达语义；
     // 仅纯文本且被压成空白时才做最终兜底，避免空 content 直发下游。
-    let content = if content.trim().is_empty() && all_images.is_empty() && all_tool_results.is_empty() {
-        ".".to_string()
-    } else {
-        content
-    };
+    let content =
+        if content.trim().is_empty() && all_images.is_empty() && all_tool_results.is_empty() {
+            ".".to_string()
+        } else {
+            content
+        };
     // 保留文本内容，即使有工具结果也不丢弃用户文本
     let mut user_msg = UserMessage::new(&content, model_id);
 
@@ -1233,6 +1285,7 @@ fn merge_user_messages(
 /// 转换 assistant 消息
 fn convert_assistant_message(
     msg: &super::types::Message,
+    tool_name_map: &mut HashMap<String, String>,
 ) -> Result<HistoryAssistantMessage, ConversionError> {
     let mut thinking_content = String::new();
     let mut text_content = String::new();
@@ -1259,7 +1312,9 @@ fn convert_assistant_message(
                         "tool_use" => {
                             if let (Some(id), Some(name)) = (block.id, block.name) {
                                 let input = block.input.unwrap_or(serde_json::json!({}));
-                                tool_uses.push(ToolUseEntry::new(id, name).with_input(input));
+                                let mapped_name = map_tool_name(&name, tool_name_map);
+                                tool_uses
+                                    .push(ToolUseEntry::new(id, mapped_name).with_input(input));
                             }
                         }
                         // WebSearch 相关块：server_tool_use 忽略，
@@ -1362,17 +1417,18 @@ fn convert_assistant_message(
 /// 用于处理网络不稳定时产生的连续 assistant 消息（Issue #79）
 fn merge_assistant_messages(
     messages: &[&super::types::Message],
+    tool_name_map: &mut HashMap<String, String>,
 ) -> Result<HistoryAssistantMessage, ConversionError> {
     assert!(!messages.is_empty());
     if messages.len() == 1 {
-        return convert_assistant_message(messages[0]);
+        return convert_assistant_message(messages[0], tool_name_map);
     }
 
     let mut all_tool_uses: Vec<ToolUseEntry> = Vec::new();
     let mut content_parts: Vec<String> = Vec::new();
 
     for msg in messages {
-        let converted = convert_assistant_message(msg)?;
+        let converted = convert_assistant_message(msg, tool_name_map)?;
         let am = converted.assistant_response_message;
         if !am.content.trim().is_empty() {
             content_parts.push(am.content);
@@ -1670,6 +1726,25 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_session_id_json_format() {
+        // 测试 JSON 格式的 user_id
+        let user_id = r#"{"device_id":"0dede55c6dcc4a11a30bbb5e7f22e6fdf86cdeba3820019cc27612af4e1243cd","account_uuid":"","session_id":"8bb5523b-ec7c-4540-a9ca-beb6d79f1552"}"#;
+        let session_id = extract_session_id(user_id);
+        assert_eq!(
+            session_id,
+            Some("8bb5523b-ec7c-4540-a9ca-beb6d79f1552".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_session_id_json_invalid_session() {
+        // 测试 JSON 格式但 session_id 不是有效 UUID
+        let user_id = r#"{"device_id":"abc","session_id":"not-a-uuid"}"#;
+        let session_id = extract_session_id(user_id);
+        assert_eq!(session_id, None);
+    }
+
+    #[test]
     fn test_convert_request_with_session_metadata() {
         use super::super::types::{Message as AnthropicMessage, Metadata};
 
@@ -1949,7 +2024,7 @@ mod tests {
             ]),
         };
 
-        let result = convert_assistant_message(&msg).expect("应该成功转换");
+        let result = convert_assistant_message(&msg, &mut HashMap::new()).expect("应该成功转换");
 
         assert!(
             result.assistant_response_message.content.is_empty(),
@@ -1979,7 +2054,7 @@ mod tests {
             ]),
         };
 
-        let result = convert_assistant_message(&msg).expect("应该成功转换");
+        let result = convert_assistant_message(&msg, &mut HashMap::new()).expect("应该成功转换");
 
         // 验证 content 使用原始文本（不是占位符）
         assert_eq!(
@@ -2022,7 +2097,7 @@ mod tests {
             ]),
         };
 
-        let result = convert_assistant_message(&msg).expect("应该成功转换");
+        let result = convert_assistant_message(&msg, &mut HashMap::new()).expect("应该成功转换");
         let content = &result.assistant_response_message.content;
 
         assert!(
@@ -2061,7 +2136,7 @@ mod tests {
             ]),
         };
 
-        let result = convert_assistant_message(&msg).expect("应该成功转换");
+        let result = convert_assistant_message(&msg, &mut HashMap::new()).expect("应该成功转换");
         let content = &result.assistant_response_message.content;
 
         // 控制字符被过滤，不应出现换行和 tab
@@ -2102,7 +2177,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_tools(&Some(tools), 4000);
+        let converted = convert_tools(&Some(tools), 4000, &mut HashMap::new());
 
         // 应该只有 1 个工具（web_search 被过滤）
         assert_eq!(converted.len(), 1, "web_search 应该被过滤");
@@ -2137,7 +2212,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_tools(&Some(tools), 4000);
+        let converted = convert_tools(&Some(tools), 4000, &mut HashMap::new());
 
         // 所有 web_search 工具都应被过滤
         assert!(converted.is_empty(), "所有 web_search 变体都应被过滤");
@@ -2895,7 +2970,7 @@ mod tests {
         };
 
         let messages: Vec<&AnthropicMessage> = vec![&msg1, &msg2];
-        let result = merge_assistant_messages(&messages).expect("合并应成功");
+        let result = merge_assistant_messages(&messages, &mut HashMap::new()).expect("合并应成功");
 
         // 验证 thinking 和 text 内容被合并
         let content = &result.assistant_response_message.content;
@@ -3020,7 +3095,7 @@ mod tests {
         };
 
         let messages: Vec<&AnthropicMessage> = vec![&msg1, &msg2];
-        let result = merge_assistant_messages(&messages).expect("合并应成功");
+        let result = merge_assistant_messages(&messages, &mut HashMap::new()).expect("合并应成功");
 
         let tool_uses = result
             .assistant_response_message
@@ -3052,7 +3127,7 @@ mod tests {
         };
 
         let messages: Vec<&AnthropicMessage> = vec![&msg1, &msg2];
-        let result = merge_assistant_messages(&messages).expect("合并应成功");
+        let result = merge_assistant_messages(&messages, &mut HashMap::new()).expect("合并应成功");
 
         assert!(
             result.assistant_response_message.content.is_empty(),
