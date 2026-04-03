@@ -72,6 +72,18 @@ impl ConversationState {
         self.history = history;
         self
     }
+
+    /// 移除历史用户消息中的所有图片，返回移除的图片数量
+    pub fn remove_history_images(&mut self) -> usize {
+        let mut removed = 0;
+        for msg in &mut self.history {
+            if let Message::User(user_msg) = msg {
+                removed += user_msg.user_input_message.images.len();
+                user_msg.user_input_message.images.clear();
+            }
+        }
+        removed
+    }
 }
 
 /// 当前消息容器

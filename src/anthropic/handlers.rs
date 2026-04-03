@@ -232,10 +232,12 @@ fn adaptive_shrink_request_body(
     // 1) 逐步降低 tool_result_max_chars（仅当存在 tool_result/tools）
     // 2) 逐步降低 tool_use_input_max_chars（仅当存在 tool_use）
     // 3) 截断超长用户消息内容（当单条消息已超过阈值时优先）
-    // 4) 按 request_body_bytes 成对移除最老的 user+assistant 两条消息（保留前 2 条）
+    // 4) 仅清除一次历史图片（保留 current_message 图片）
+    // 5) 按 request_body_bytes 成对移除最老的 user+assistant 两条消息（保留前 2 条）
     //
     // 每轮都会重新跑一次压缩管道（包含 tool 配对修复），再重新序列化计算字节数。
     let mut adaptive_config = base_config.clone();
+    let mut history_images_removed = false;
 
     // 是否存在任何 tool_result / tools（否则降低阈值只会浪费迭代次数）
     let has_any_tool_results_or_tools = {
@@ -285,6 +287,14 @@ fn adaptive_shrink_request_body(
                 .is_some_and(|t| !t.is_empty()),
             _ => false,
         });
+
+    // 是否存在历史图片（否则无需尝试图片降级）
+    let has_history_images = kiro_request.conversation_state.history.iter().any(|msg| match msg {
+        crate::kiro::model::requests::conversation::Message::User(u) => {
+            !u.user_input_message.images.is_empty()
+        }
+        _ => false,
+    });
 
     // 扫描所有用户消息，找到最大 content 字符数作为初始 message_content_max_chars
     let max_content_chars = {
@@ -363,8 +373,15 @@ fn adaptive_shrink_request_body(
                 // 每轮递减 3/4
                 message_content_max_chars =
                     (message_content_max_chars * 3 / 4).max(ADAPTIVE_MIN_MESSAGE_CONTENT_MAX_CHARS);
+            } else if !history_images_removed && has_history_images {
+                // 第四层：仅清除历史图片，保留 current_message 图片
+                let removed = kiro_request.conversation_state.remove_history_images();
+                if removed > 0 {
+                    history_images_removed = true;
+                    changed = true;
+                }
             } else if history.len() > ADAPTIVE_HISTORY_PRESERVE_MESSAGES + 2 {
-                // 第四层：移除最老历史消息（成对移除 user+assistant）
+                // 第五层：移除最老历史消息（成对移除 user+assistant）
                 let preserve = ADAPTIVE_HISTORY_PRESERVE_MESSAGES;
                 let min_len = preserve + 2;
                 let removable = history.len().saturating_sub(min_len);
@@ -418,13 +435,13 @@ fn map_kiro_provider_error_to_response(request_body: &str, err: Error) -> Respon
         tracing::warn!(
             error = %err,
             kiro_request_body_bytes = request_body.len(),
-            "上游拒绝请求：请求格式错误（可能是空消息内容或其他格式问题）"
+            "上游拒绝请求：请求格式错误（可能由超大请求体、消息/工具序列异常或空内容块导致）"
         );
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(
                 "invalid_request_error",
-                "Improperly formed request. Check message content is not empty and request format is valid.",
+                "Improperly formed request. This is often caused by oversized payloads, malformed message/tool sequences, or empty content blocks.",
             )),
         )
             .into_response();
@@ -1623,6 +1640,9 @@ fn is_likely_base64(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::anthropic::types::{Message, SystemMessage};
+    use crate::kiro::model::requests::conversation::{
+        ConversationState, CurrentMessage, KiroImage, Message as KiroMessage, UserInputMessage,
+    };
 
     fn sample_messages_request() -> MessagesRequest {
         // 生成一个超过 1024 tokens 的 system message 用于测试缓存
@@ -1803,5 +1823,44 @@ mod tests {
 
         let err = anyhow::anyhow!("没有可用的凭据（可用: 0/0），请添加或启用凭据后重试");
         assert!(!is_quota_exhausted_error(&err));
+    }
+
+    #[test]
+    fn test_adaptive_shrink_removes_only_history_images() {
+        let big = "A".repeat(20_000);
+        let mut kiro_request = KiroRequest {
+            conversation_state: ConversationState::new("conv-1")
+                .with_current_message(CurrentMessage::new(
+                    UserInputMessage::new("current", "model").with_images(vec![
+                        KiroImage::from_base64("png", big.clone()),
+                    ]),
+                ))
+                .with_history(vec![KiroMessage::user("history", "model")]),
+            profile_arn: None,
+        };
+        if let KiroMessage::User(user) = &mut kiro_request.conversation_state.history[0] {
+            user.user_input_message.images = vec![KiroImage::from_base64("png", big.clone())];
+        }
+
+        let removed = kiro_request.conversation_state.remove_history_images();
+
+        assert_eq!(removed, 1);
+        assert_eq!(
+            kiro_request.conversation_state.current_message.user_input_message.images.len(),
+            1
+        );
+        assert!(match &kiro_request.conversation_state.history[0] {
+            KiroMessage::User(user) => user.user_input_message.images.is_empty(),
+            _ => false,
+        });
+    }
+
+    #[test]
+    fn test_improperly_formed_request_message_mentions_common_causes() {
+        let response = map_kiro_provider_error_to_response(
+            "{}",
+            anyhow::anyhow!("400 Improperly formed request"),
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
