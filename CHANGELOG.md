@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v1.1.16] - 2026-04-03
 
 ### Fixed
 - **工具名超过 63 字符报错修复** — 新增 `shorten_tool_name()`（SHA256 确定性缩短）和 `map_tool_name()` 映射机制，对超长工具名自动缩短并在请求/响应中双向还原，避免 Kiro API 拒绝超长 MCP 工具名。影响 `converter.rs`、`stream.rs`、`handlers.rs`
