@@ -12,7 +12,7 @@ import { ImportTokenJsonDialog } from '@/components/import-token-json-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
 import { ProxyConfigDialog } from '@/components/proxy-config-dialog'
 import { GlobalConfigDialog } from '@/components/global-config-dialog'
-import { useCredentials, useCachedBalances, useDeleteCredential, useResetFailure, useProxyConfig, useGlobalConfig } from '@/hooks/use-credentials'
+import { useCredentials, useCachedBalances, useDeleteCredential, useResetFailure, useForceRefreshToken, useProxyConfig, useGlobalConfig } from '@/hooks/use-credentials'
 import { getCredentialBalance } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -59,6 +59,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { data: cachedBalancesData } = useCachedBalances()
   const { mutate: deleteCredential } = useDeleteCredential()
   const { mutate: resetFailure } = useResetFailure()
+  const { mutate: forceRefreshToken } = useForceRefreshToken()
   const { data: proxyConfig } = useProxyConfig()
   const { data: globalConfig } = useGlobalConfig()
 
@@ -254,7 +255,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
     const failedIds = Array.from(selectedIds).filter(id => {
       const cred = data?.credentials.find(c => c.id === id)
-      return cred && cred.failureCount > 0
+      return cred && (cred.failureCount > 0 || cred.refreshFailureCount > 0)
     })
 
     if (failedIds.length === 0) {
@@ -291,6 +292,42 @@ export function Dashboard({ onLogout }: DashboardProps) {
     }
 
     deselectAll()
+  }
+
+  const handleBatchForceRefresh = async () => {
+    if (selectedIds.size === 0) {
+      toast.error('请先选择要刷新的凭据')
+      return
+    }
+
+    const ids = Array.from(selectedIds)
+    let successCount = 0
+    let failCount = 0
+
+    for (const id of ids) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          forceRefreshToken(id, {
+            onSuccess: () => {
+              successCount++
+              resolve()
+            },
+            onError: () => {
+              failCount++
+              reject(new Error('refresh failed'))
+            }
+          })
+        })
+      } catch {
+        // noop
+      }
+    }
+
+    if (failCount === 0) {
+      toast.success(`成功刷新 ${successCount} 个凭据`)
+    } else {
+      toast.warning(`刷新完成：成功 ${successCount} 个，失败 ${failCount} 个`)
+    }
   }
 
   // 一键清除所有已禁用凭据
@@ -633,6 +670,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   <Button onClick={handleBatchVerify} size="sm" variant="outline">
                     <CheckCircle2 className="h-4 w-4 mr-2" />
                     批量验活
+                  </Button>
+                  <Button onClick={handleBatchForceRefresh} size="sm" variant="outline">
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    批量刷新
                   </Button>
                   <Button onClick={handleBatchResetFailure} size="sm" variant="outline">
                     <RotateCcw className="h-4 w-4 mr-2" />

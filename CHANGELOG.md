@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **工具名超过 63 字符报错修复** — 新增 `shorten_tool_name()`（SHA256 确定性缩短）和 `map_tool_name()` 映射机制，对超长工具名自动缩短并在请求/响应中双向还原，避免 Kiro API 拒绝超长 MCP 工具名。影响 `converter.rs`、`stream.rs`、`handlers.rs`
+- **JSON 格式 user_id 中提取 session_id** — 扩展 `extract_session_id()` 同时支持旧格式字符串 `...session_<uuid>` 和 JSON 格式 `{"session_id":"UUID"}`，修复部分客户端 conversationId 无法正确生成的问题 (`src/anthropic/converter.rs`)
+
+### Added
+- **KAM 1.8.3 新版平铺格式导入兼容** — 在现有导入对话框中新增 `normalizeKamAccount()` 转换层，自动识别 KAM 1.8.3+ 平铺格式并归一化为旧嵌套结构，复用已有预览/导入/验活流程 (`admin-ui/src/components/import-token-json-dialog.tsx`)
+- **Token 刷新失败独立计数与禁用策略** — `CredentialEntry` 新增 `refresh_failure_count`，刷新失败不再污染 API 调用失败计数；达到阈值后独立禁用（`RefreshFailureLimit`），刷新成功自动解除。Admin 快照暴露 `refresh_failure_count` 和 `disabled_reason` (`src/kiro/token_manager.rs`, `src/admin/types.rs`, `src/admin/service.rs`)
+- **强制刷新 Token 功能** — 新增 `POST /api/admin/credentials/:id/refresh` 接口和前端单个/批量刷新入口，支持手动触发 Token 刷新并重置失败计数 (`src/admin/handlers.rs`, `src/admin/router.rs`, `admin-ui/`)
+
 ## [v1.1.15] - 2026-04-01
 
 ### Fixed

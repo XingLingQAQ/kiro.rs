@@ -71,6 +71,42 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
     setTimeout(resetState, 200)
   }, [onOpenChange, resetState, isVerifying])
 
+  // 兼容 KAM 1.8.3 新版平铺格式，统一转换为旧格式（credentials 嵌套结构）
+  const normalizeKamAccount = useCallback((item: unknown): unknown => {
+    if (!item || typeof item !== 'object') return item
+    const obj = item as Record<string, unknown>
+
+    // 新格式：refreshToken 直接在账号对象上，无 credentials 嵌套
+    if (typeof obj.refreshToken === 'string' && typeof obj.credentials === 'undefined') {
+      const nickname = typeof obj.nickname === 'string'
+        ? obj.nickname
+        : typeof obj.label === 'string'
+          ? obj.label
+          : undefined
+
+      return {
+        email: typeof obj.email === 'string' ? obj.email : undefined,
+        userId:
+          typeof obj.userId === 'string' || obj.userId === null
+            ? obj.userId
+            : undefined,
+        nickname,
+        status: typeof obj.status === 'string' ? obj.status : undefined,
+        machineId: typeof obj.machineId === 'string' ? obj.machineId : undefined,
+        credentials: {
+          refreshToken: obj.refreshToken,
+          clientId: typeof obj.clientId === 'string' ? obj.clientId : undefined,
+          clientSecret: typeof obj.clientSecret === 'string' ? obj.clientSecret : undefined,
+          region: typeof obj.region === 'string' ? obj.region : undefined,
+          authMethod: typeof obj.authMethod === 'string' ? obj.authMethod : undefined,
+          startUrl: typeof obj.startUrl === 'string' ? obj.startUrl : undefined,
+        },
+      }
+    }
+
+    return item
+  }, [])
+
   // 将 KAM 账号结构展平为 TokenJsonItem
   const flattenKamAccount = useCallback((account: Record<string, unknown>): TokenJsonItem | null => {
     const cred = account.credentials as Record<string, unknown> | undefined
@@ -111,8 +147,9 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
 
       const validItems: TokenJsonItem[] = []
       for (const item of rawItems) {
-        if (!item || typeof item !== 'object') continue
-        const obj = item as Record<string, unknown>
+        const normalized = normalizeKamAccount(item)
+        if (!normalized || typeof normalized !== 'object') continue
+        const obj = normalized as Record<string, unknown>
 
         // KAM 嵌套格式：{ credentials: { refreshToken, ... } }
         if (obj.credentials && typeof obj.credentials === 'object') {
@@ -144,7 +181,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
       toast.error('JSON 格式无效')
       return null
     }
-  }, [flattenKamAccount])
+  }, [flattenKamAccount, normalizeKamAccount])
 
   // 文件拖放
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -409,7 +446,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
                 <label className="text-sm font-medium">直接粘贴 JSON</label>
                 <textarea
                   className="w-full h-48 p-3 text-sm font-mono border rounded-md bg-background resize-none focus:outline-none focus:ring-2 focus:ring-ring"
-                  placeholder='{"refreshToken": "...", "provider": "BuilderId", ...}'
+                  placeholder={'粘贴 Kiro Account Manager 导出的 JSON\n\n支持 KAM 1.8.3+ 新版平铺格式：\n[\n  {\n    "email": "...",\n    "refreshToken": "...",\n    "clientId": "...",\n    "clientSecret": "...",\n    "region": "us-east-1"\n  }\n]\n\n也支持旧版嵌套格式：\n{\n  "version": "1.5.0",\n  "accounts": [\n    {\n      "email": "...",\n      "credentials": {\n        "refreshToken": "...",\n        "clientId": "...",\n        "clientSecret": "...",\n        "region": "us-east-1"\n      }\n    }\n  ]\n}'}
                   value={jsonText}
                   onChange={(e) => setJsonText(e.target.value)}
                 />

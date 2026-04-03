@@ -21,6 +21,7 @@ import {
   useSetPriority,
   useSetRegion,
   useResetFailure,
+  useForceRefreshToken,
   useDeleteCredential,
 } from '@/hooks/use-credentials'
 
@@ -70,6 +71,7 @@ export function CredentialCard({
   const setPriority = useSetPriority()
   const setRegion = useSetRegion()
   const resetFailure = useResetFailure()
+  const forceRefreshToken = useForceRefreshToken()
   const deleteCredential = useDeleteCredential()
 
   const handleToggleDisabled = () => {
@@ -132,6 +134,17 @@ export function CredentialCard({
       },
       onError: (err) => {
         toast.error('操作失败: ' + (err as Error).message)
+      },
+    })
+  }
+
+  const handleForceRefresh = () => {
+    forceRefreshToken.mutate(credential.id, {
+      onSuccess: (res) => {
+        toast.success(res.message)
+      },
+      onError: (err) => {
+        toast.error('刷新失败: ' + (err as Error).message)
       },
     })
   }
@@ -255,6 +268,11 @@ export function CredentialCard({
               <span className={credential.failureCount > 0 ? 'text-red-500 font-medium' : ''}>
                 {credential.failureCount}
               </span>
+              {credential.refreshFailureCount > 0 && (
+                <span className="ml-2 text-amber-600 font-medium">
+                  刷新 {credential.refreshFailureCount}
+                </span>
+              )}
             </div>
             <div>
               <span className="text-muted-foreground">订阅等级：</span>
@@ -272,6 +290,12 @@ export function CredentialCard({
               <span className="text-muted-foreground">最后调用：</span>
               <span className="font-medium">{formatLastUsed(credential.lastUsedAt)}</span>
             </div>
+            {credential.disabledReason && (
+              <div className="col-span-2">
+                <span className="text-muted-foreground">禁用原因：</span>
+                <span className="font-medium">{credential.disabledReason}</span>
+              </div>
+            )}
             <div className="col-span-2">
               <span className="text-muted-foreground">剩余用量：</span>
               {loadingBalance ? (
@@ -421,6 +445,15 @@ export function CredentialCard({
             >
               <ChevronDown className="h-4 w-4 mr-1" />
               降低优先级
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleForceRefresh}
+              disabled={forceRefreshToken.isPending}
+            >
+              <RefreshCw className={`h-4 w-4 mr-1 ${forceRefreshToken.isPending ? 'animate-spin' : ''}`} />
+              刷新 Token
             </Button>
             <Button
               size="sm"

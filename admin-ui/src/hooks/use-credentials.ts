@@ -7,6 +7,7 @@ import {
   setCredentialPriority,
   setCredentialRegion,
   resetCredentialFailure,
+  forceRefreshToken,
   getCredentialBalance,
   getCachedBalances,
   getCredentialAccountInfo,
@@ -28,6 +29,18 @@ export function useCredentials() {
     queryKey: ['credentials'],
     queryFn: getCredentials,
     refetchInterval: 30000, // 每 30 秒刷新一次
+  })
+}
+
+// 强制刷新 Token
+export function useForceRefreshToken() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => forceRefreshToken(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
+    },
   })
 }
 
