@@ -28,6 +28,10 @@ pub struct CredentialStatusItem {
     pub disabled: bool,
     /// 连续失败次数
     pub failure_count: u32,
+    /// Token 刷新连续失败次数
+    pub refresh_failure_count: u32,
+    /// 禁用原因
+    pub disabled_reason: Option<String>,
     /// Token 过期时间（RFC3339 格式）
     pub expires_at: Option<String>,
     /// 认证方式

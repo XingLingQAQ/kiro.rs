@@ -83,6 +83,8 @@ impl AdminService {
                 priority: entry.priority,
                 disabled: entry.disabled,
                 failure_count: entry.failure_count,
+                refresh_failure_count: entry.refresh_failure_count,
+                disabled_reason: entry.disable_reason.map(|reason| format!("{:?}", reason)),
                 expires_at: entry.expires_at,
                 auth_method: entry.auth_method,
                 has_profile_arn: entry.has_profile_arn,
@@ -142,6 +144,14 @@ impl AdminService {
     pub fn reset_and_enable(&self, id: u64) -> Result<(), AdminServiceError> {
         self.token_manager
             .reset_and_enable(id)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 强制刷新指定凭据 Token
+    pub async fn force_refresh_token(&self, id: u64) -> Result<(), AdminServiceError> {
+        self.token_manager
+            .force_refresh_token_for(id)
+            .await
             .map_err(|e| self.classify_error(e, id))
     }
 

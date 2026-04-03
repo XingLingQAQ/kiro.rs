@@ -476,6 +476,8 @@ pub(crate) async fn get_usage_limits(
 pub enum DisableReason {
     /// 连续失败次数过多
     FailureLimit,
+    /// Token 刷新连续失败次数过多
+    RefreshFailureLimit,
     /// 余额不足
     #[allow(dead_code)]
     InsufficientBalance,
@@ -496,6 +498,8 @@ struct CredentialEntry {
     credentials: KiroCredentials,
     /// API 调用连续失败次数
     failure_count: u32,
+    /// Token 刷新连续失败次数
+    refresh_failure_count: u32,
     /// 是否已禁用
     disabled: bool,
     /// 自愈原因（用于区分手动禁用 vs 自动禁用，便于自愈逻辑判断）
@@ -549,6 +553,8 @@ pub struct CredentialEntrySnapshot {
     pub disable_reason: Option<DisableReason>,
     /// 连续失败次数
     pub failure_count: u32,
+    /// Token 刷新连续失败次数
+    pub refresh_failure_count: u32,
     /// 认证方式
     pub auth_method: Option<String>,
     /// 是否有 Profile ARN
@@ -813,6 +819,7 @@ impl MultiTokenManager {
                     id,
                     credentials: cred.clone(),
                     failure_count: 0,
+                    refresh_failure_count: 0,
                     disabled: cred.disabled, // 从配置文件读取 disabled 状态
                     auto_heal_reason: if cred.disabled {
                         Some(AutoHealReason::Manual)
@@ -1566,8 +1573,49 @@ impl MultiTokenManager {
             {
                 // 确实需要刷新
                 let proxy = self.proxy.read().clone();
-                let new_creds =
-                    refresh_token_with_id(&current_creds, &config, proxy.as_ref(), id).await?;
+                let new_creds = match refresh_token_with_id(
+                    &current_creds,
+                    &config,
+                    proxy.as_ref(),
+                    id,
+                )
+                .await
+                {
+                    Ok(creds) => {
+                        let mut entries = self.entries.lock();
+                        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                            entry.refresh_failure_count = 0;
+                            if entry.disable_reason == Some(DisableReason::RefreshFailureLimit) {
+                                entry.disabled = false;
+                                entry.auto_heal_reason = None;
+                                entry.disable_reason = None;
+                            }
+                        }
+                        creds
+                    }
+                    Err(err) => {
+                        let has_available = {
+                            let mut entries = self.entries.lock();
+                            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                                entry.refresh_failure_count += 1;
+                                let refresh_failure_count = entry.refresh_failure_count;
+                                if refresh_failure_count >= MAX_FAILURES_PER_CREDENTIAL {
+                                    entry.disabled = true;
+                                    entry.auto_heal_reason = Some(AutoHealReason::TooManyFailures);
+                                    entry.disable_reason = Some(DisableReason::RefreshFailureLimit);
+                                }
+                            }
+                            entries.iter().any(|e| !e.disabled && e.id != id)
+                        };
+                        tracing::warn!(
+                            credential_id = id,
+                            has_available,
+                            "凭据 Token 刷新失败: {}",
+                            err
+                        );
+                        return Err(err);
+                    }
+                };
 
                 if is_token_expired(&new_creds) {
                     anyhow::bail!("刷新后的 Token 仍然无效或已过期");
@@ -2134,6 +2182,7 @@ impl MultiTokenManager {
                         disabled: e.disabled,
                         disable_reason: e.disable_reason,
                         failure_count: e.failure_count,
+                        refresh_failure_count: e.refresh_failure_count,
                         auth_method: e.credentials.auth_method.as_deref().map(|m| {
                             if m.eq_ignore_ascii_case("builder-id") || m.eq_ignore_ascii_case("iam")
                             {
@@ -2226,11 +2275,51 @@ impl MultiTokenManager {
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
             entry.failure_count = 0;
+            entry.refresh_failure_count = 0;
             entry.disabled = false;
             entry.auto_heal_reason = None;
             entry.disable_reason = None;
         }
         // 持久化更改
+        self.persist_credentials()?;
+        Ok(())
+    }
+
+    /// 强制刷新指定凭据的 Token（Admin API）
+    pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
+        let config = self.config.read().clone();
+        let credentials = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.credentials.clone())
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+        };
+
+        // 持有刷新锁，避免与业务请求自动刷新并发
+        let _guard = self.refresh_lock.lock().await;
+
+        let proxy = self.proxy.read().clone();
+        let new_creds = refresh_token_with_id(&credentials, &config, proxy.as_ref(), id).await?;
+
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.credentials = new_creds.clone();
+                entry.refresh_failure_count = 0;
+                entry.refresh_token_hash = new_creds.refresh_token.as_deref().map(sha256_hex);
+
+                // 仅对自动禁用（失败阈值/刷新失败）自动恢复，手动禁用状态保持不变
+                if entry.disabled && entry.disable_reason != Some(DisableReason::Manual) {
+                    entry.failure_count = 0;
+                    entry.disabled = false;
+                    entry.auto_heal_reason = None;
+                    entry.disable_reason = None;
+                }
+            }
+        }
+
         self.persist_credentials()?;
         Ok(())
     }
@@ -2385,6 +2474,7 @@ impl MultiTokenManager {
                 id: new_id,
                 credentials: validated_cred,
                 failure_count: 0,
+                refresh_failure_count: 0,
                 disabled: false,
                 auto_heal_reason: None,
                 disable_reason: None,
