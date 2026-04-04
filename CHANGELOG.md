@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.1.17] - 2026-04-04
+
+### 修复
+- **CI: pnpm-workspace.yaml 添加 packages 字段** — 修复 pnpm workspace 配置缺少 packages 字段的问题
+
 ## [v1.1.16] - 2026-04-03
 
 ### Fixed
