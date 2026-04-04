@@ -153,6 +153,14 @@ fn sha256_hex(input: &str) -> String {
     format!("{:x}", result)
 }
 
+fn is_invalid_grant_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains("invalid_grant")
+}
+
+fn is_temporarily_suspended_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains("TEMPORARILY_SUSPENDED")
+}
+
 /// 验证 refreshToken 的基本有效性
 pub(crate) fn validate_refresh_token(credentials: &KiroCredentials) -> anyhow::Result<()> {
     let refresh_token = credentials
@@ -478,6 +486,10 @@ pub enum DisableReason {
     FailureLimit,
     /// Token 刷新连续失败次数过多
     RefreshFailureLimit,
+    /// 认证失败（如 invalid_grant）
+    AuthenticationFailed,
+    /// 账户被暂停
+    AccountSuspended,
     /// 余额不足
     #[allow(dead_code)]
     InsufficientBalance,
@@ -1594,6 +1606,16 @@ impl MultiTokenManager {
                         creds
                     }
                     Err(err) => {
+                        if is_invalid_grant_error(&err) {
+                            self.mark_authentication_failed(id);
+                            tracing::warn!(
+                                credential_id = id,
+                                "凭据 Token 刷新失败（invalid_grant，已立即禁用）: {}",
+                                err
+                            );
+                            return Err(err);
+                        }
+
                         let has_available = {
                             let mut entries = self.entries.lock();
                             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
@@ -2061,6 +2083,32 @@ impl MultiTokenManager {
         recovered_count > 0
     }
 
+    /// 标记凭据为认证失败（如 invalid_grant，不会被自动恢复）
+    pub fn mark_authentication_failed(&self, id: u64) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            entry.disabled = true;
+            entry.auto_heal_reason = None;
+            entry.disable_reason = Some(DisableReason::AuthenticationFailed);
+            tracing::warn!("凭据 #{} 已标记为认证失败", id);
+        }
+        drop(entries);
+        self.affinity.remove_by_credential(id);
+    }
+
+    /// 标记凭据为账户暂停（不会被自动恢复）
+    pub fn mark_account_suspended(&self, id: u64) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            entry.disabled = true;
+            entry.auto_heal_reason = None;
+            entry.disable_reason = Some(DisableReason::AccountSuspended);
+            tracing::warn!("凭据 #{} 已标记为账户暂停", id);
+        }
+        drop(entries);
+        self.affinity.remove_by_credential(id);
+    }
+
     /// 标记凭据为余额不足（不会被自动恢复）
     pub fn mark_insufficient_balance(&self, id: u64) {
         let mut entries = self.entries.lock();
@@ -2392,7 +2440,35 @@ impl MultiTokenManager {
 
         let proxy = self.proxy.read().clone();
         let config = self.config.read().clone();
-        get_usage_limits(&credentials, &config, &token, proxy.as_ref()).await
+        match get_usage_limits(&credentials, &config, &token, proxy.as_ref()).await {
+            Ok(usage) => {
+                let mut should_persist = false;
+                if let Some(subscription_title) = usage.subscription_title() {
+                    let mut entries = self.entries.lock();
+                    if let Some(entry) = entries.iter_mut().find(|e| e.id == id)
+                        && entry.credentials.subscription_title.as_deref()
+                            != Some(subscription_title)
+                    {
+                        entry.credentials.subscription_title = Some(subscription_title.to_string());
+                        should_persist = true;
+                    }
+                }
+
+                if should_persist && let Err(e) = self.persist_credentials() {
+                    tracing::warn!("订阅等级更新后持久化失败（不影响本次请求）: {}", e);
+                }
+
+                Ok(usage)
+            }
+            Err(err) => {
+                if is_invalid_grant_error(&err) {
+                    self.mark_authentication_failed(id);
+                } else if is_temporarily_suspended_error(&err) {
+                    self.mark_account_suspended(id);
+                }
+                Err(err)
+            }
+        }
     }
 
     /// 添加新凭据（Admin API）
