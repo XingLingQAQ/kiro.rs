@@ -1,9 +1,13 @@
 # Changelog
 
-## [v1.1.17] - 2026-04-04
+## [v1.1.18] - 2026-04-04
 
 ### 修复
 - **失效凭据立即禁用与订阅等级回写** — `invalid_grant` 的 IdC refresh 失败现在会立即禁用凭据，`TEMPORARILY_SUSPENDED` 的额度查询失败也会立即禁用凭据；同时 `get_usage_limits_for()` 成功后会回写并持久化 `subscription_title`，避免 Free 账号在订阅信息未刷新时误放行 Opus (`src/kiro/token_manager.rs`)
+
+## [v1.1.17] - 2026-04-04
+
+### 修复
 - **CI: pnpm-workspace.yaml 添加 packages 字段** — 修复 pnpm workspace 配置缺少 packages 字段的问题
 
 ## [v1.1.16] - 2026-04-03
