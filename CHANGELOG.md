@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.1.19] - 2026-04-04
+
+### 修复
+- **Admin 余额启动恢复与展示统一** — 启动时将磁盘余额缓存回灌到运行时缓存；缓存余额接口扩展返回 `usageLimit`/`usagePercentage`/`subscriptionTitle`，使页面刷新后卡片仍能以完整格式展示；订阅等级改为三级回退：实时余额 → 缓存余额 → 凭据快照；`invalid_grant` 的 IdC refresh 失败与 `TEMPORARILY_SUSPENDED` 额度查询失败立即禁用凭据；`get_usage_limits_for()` 成功后回写并持久化 `subscription_title`
+
 ## [v1.1.18] - 2026-04-04
 
 ### 修复
