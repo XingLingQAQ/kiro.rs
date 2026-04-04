@@ -577,6 +577,8 @@ pub struct CredentialEntrySnapshot {
     pub refresh_token_hash: Option<String>,
     /// 用户邮箱（用于前端显示）
     pub email: Option<String>,
+    /// 已持久化的订阅等级（页面刷新后可直接展示）
+    pub subscription_title: Option<String>,
     /// API 调用成功次数
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
@@ -1442,6 +1444,42 @@ impl MultiTokenManager {
         );
     }
 
+    /// 从持久化缓存恢复余额信息（用于服务启动后恢复 Admin UI 展示）
+    pub fn restore_balance_cache(&self, id: u64, remaining: f64, cached_at_unix_secs: f64) {
+        let mut cache = self.balance_cache.lock();
+        let now_instant = std::time::Instant::now();
+        let now_unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let age_secs = (now_unix_secs - cached_at_unix_secs).max(0.0);
+        // 若系统 uptime < age_secs（如刚重启），checked_sub 会返回 None，
+        // 此时设为足够旧的时间点（now - 24h），确保 TTL 判定视为已过期
+        let restored_cached_at = now_instant
+            .checked_sub(std::time::Duration::from_secs_f64(age_secs))
+            .unwrap_or_else(|| {
+                now_instant
+                    .checked_sub(std::time::Duration::from_secs(86400))
+                    .unwrap_or(now_instant)
+            });
+
+        let (recent_usage, usage_reset_at) = cache
+            .get(&id)
+            .map(|e| (e.recent_usage, e.usage_reset_at))
+            .unwrap_or((0, now_instant));
+
+        cache.insert(
+            id,
+            CachedBalance {
+                remaining,
+                cached_at: restored_cached_at,
+                initialized: true,
+                recent_usage,
+                usage_reset_at,
+            },
+        );
+    }
+
     /// 检查是否需要刷新余额缓存
     pub fn should_refresh_balance(&self, id: u64) -> bool {
         let cache = self.balance_cache.lock();
@@ -2243,6 +2281,7 @@ impl MultiTokenManager {
                         expires_at: e.credentials.expires_at.clone(),
                         refresh_token_hash: hash,
                         email: e.credentials.email.clone(),
+                        subscription_title: e.credentials.subscription_title.clone(),
                         success_count: e.success_count,
                         last_used_at: e.last_used_at.clone(),
                         region: e.credentials.region.clone(),
@@ -2387,47 +2426,58 @@ impl MultiTokenManager {
         // 检查是否需要刷新 token
         let needs_refresh = is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
 
-        let token = if needs_refresh {
-            let _guard = self.refresh_lock.lock().await;
-            let current_creds = {
-                let entries = self.entries.lock();
-                entries
-                    .iter()
-                    .find(|e| e.id == id)
-                    .map(|e| e.credentials.clone())
-                    .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
-            };
+        let token =
+            if needs_refresh {
+                let _guard = self.refresh_lock.lock().await;
+                let current_creds = {
+                    let entries = self.entries.lock();
+                    entries
+                        .iter()
+                        .find(|e| e.id == id)
+                        .map(|e| e.credentials.clone())
+                        .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+                };
 
-            if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
-                let proxy = self.proxy.read().clone();
-                let new_creds =
-                    refresh_token_with_id(&current_creds, &config, proxy.as_ref(), id).await?;
-                {
-                    let mut entries = self.entries.lock();
-                    if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                        entry.credentials = new_creds.clone();
-                        // 更新哈希缓存
-                        entry.refresh_token_hash =
-                            new_creds.refresh_token.as_deref().map(sha256_hex);
+                if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
+                    let proxy = self.proxy.read().clone();
+                    let new_creds =
+                        match refresh_token_with_id(&current_creds, &config, proxy.as_ref(), id)
+                            .await
+                        {
+                            Ok(creds) => creds,
+                            Err(err) => {
+                                if is_invalid_grant_error(&err) {
+                                    self.mark_authentication_failed(id);
+                                }
+                                return Err(err);
+                            }
+                        };
+                    {
+                        let mut entries = self.entries.lock();
+                        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                            entry.credentials = new_creds.clone();
+                            // 更新哈希缓存
+                            entry.refresh_token_hash =
+                                new_creds.refresh_token.as_deref().map(sha256_hex);
+                        }
                     }
+                    // 持久化失败只记录警告，不影响本次请求
+                    if let Err(e) = self.persist_credentials() {
+                        tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
+                    }
+                    new_creds
+                        .access_token
+                        .ok_or_else(|| anyhow::anyhow!("刷新后无 access_token"))?
+                } else {
+                    current_creds
+                        .access_token
+                        .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
                 }
-                // 持久化失败只记录警告，不影响本次请求
-                if let Err(e) = self.persist_credentials() {
-                    tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
-                }
-                new_creds
-                    .access_token
-                    .ok_or_else(|| anyhow::anyhow!("刷新后无 access_token"))?
             } else {
-                current_creds
+                credentials
                     .access_token
                     .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
-            }
-        } else {
-            credentials
-                .access_token
-                .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
-        };
+            };
 
         let credentials = {
             let entries = self.entries.lock();

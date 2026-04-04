@@ -279,7 +279,7 @@ export function CredentialCard({
               <span className="font-medium">
                 {loadingBalance ? (
                   <Loader2 className="inline w-3 h-3 animate-spin" />
-                ) : balance?.subscriptionTitle || '未知'}
+                ) : balance?.subscriptionTitle ?? cachedBalance?.subscriptionTitle ?? credential.subscriptionTitle ?? '未知'}
               </span>
             </div>
             <div>
@@ -297,7 +297,7 @@ export function CredentialCard({
               </div>
             )}
             <div className="col-span-2">
-              <span className="text-muted-foreground">剩余用量：</span>
+              <span className="text-muted-foreground">余额：</span>
               {loadingBalance ? (
                 <span className="text-sm ml-1">
                   <Loader2 className="inline w-3 h-3 animate-spin" /> 加载中...
@@ -309,23 +309,22 @@ export function CredentialCard({
                     ({(100 - balance.usagePercentage).toFixed(1)}% 剩余)
                   </span>
                 </span>
+              ) : cachedBalance && cachedBalance.ttlSecs > 0 && cachedBalance.usageLimit > 0 ? (
+                <span className="font-medium ml-1">
+                  {cachedBalance.remaining.toFixed(2)} / {cachedBalance.usageLimit.toFixed(2)}
+                  <span className="text-xs text-muted-foreground ml-1">
+                    ({(100 - cachedBalance.usagePercentage).toFixed(1)}% 剩余, {formatCacheAge(cachedBalance.cachedAt)}缓存)
+                  </span>
+                </span>
+              ) : cachedBalance && cachedBalance.ttlSecs > 0 ? (
+                <span className="font-medium ml-1">
+                  ${cachedBalance.remaining.toFixed(2)}
+                  <span className="text-xs text-muted-foreground ml-1">
+                    ({formatCacheAge(cachedBalance.cachedAt)}缓存)
+                  </span>
+                </span>
               ) : (
                 <span className="text-sm text-muted-foreground ml-1">未知</span>
-              )}
-            </div>
-            <div>
-              <span className="text-muted-foreground">余额：</span>
-              {cachedBalance && cachedBalance.ttlSecs > 0 ? (
-                <>
-                  <span className={`font-medium ${cachedBalance.remaining > 0 ? 'text-green-600' : 'text-red-500'}`}>
-                    ${cachedBalance.remaining.toFixed(2)}
-                  </span>
-                  <span className="text-xs text-muted-foreground ml-1">
-                    ({formatCacheAge(cachedBalance.cachedAt)})
-                  </span>
-                </>
-              ) : (
-                <span className="text-muted-foreground">—</span>
               )}
             </div>
             {credential.hasProxy && (

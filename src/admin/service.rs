@@ -12,7 +12,7 @@ use crate::common::utf8::floor_char_boundary;
 use crate::http_client::ProxyConfig;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::provider::KiroProvider;
-use crate::kiro::token_manager::MultiTokenManager;
+use crate::kiro::token_manager::{CachedBalanceInfo, MultiTokenManager};
 use crate::model::config::{CompressionConfig, Config};
 use parking_lot::RwLock;
 
@@ -61,6 +61,10 @@ impl AdminService {
 
         let balance_cache = Self::load_balance_cache_from(&cache_path);
 
+        for (id, cached) in &balance_cache {
+            token_manager.restore_balance_cache(*id, cached.data.remaining, cached.cached_at);
+        }
+
         Self {
             token_manager,
             kiro_provider,
@@ -90,6 +94,7 @@ impl AdminService {
                 has_profile_arn: entry.has_profile_arn,
                 refresh_token_hash: entry.refresh_token_hash,
                 email: entry.email,
+                subscription_title: entry.subscription_title,
                 success_count: entry.success_count,
                 last_used_at: entry.last_used_at.clone(),
                 region: entry.region,
@@ -221,15 +226,42 @@ impl AdminService {
 
     /// 获取所有凭据的缓存余额
     pub fn get_cached_balances(&self) -> CachedBalancesResponse {
-        let balances = self
+        // 从 token_manager 获取运行时缓存（含 TTL 信息）
+        let runtime_balances: HashMap<u64, CachedBalanceInfo> = self
             .token_manager
             .get_all_cached_balances()
             .into_iter()
-            .map(|info| CachedBalanceItem {
-                id: info.id,
-                remaining: info.remaining,
-                cached_at: info.cached_at,
-                ttl_secs: info.ttl_secs,
+            .map(|info| (info.id, info))
+            .collect();
+
+        // 从 AdminService 磁盘缓存获取完整余额信息
+        let disk_cache = self.balance_cache.lock();
+
+        let balances = runtime_balances
+            .into_iter()
+            .map(|(id, info)| {
+                // 优先从磁盘缓存获取完整快照（保证字段一致性）
+                if let Some(cached) = disk_cache.get(&id) {
+                    CachedBalanceItem {
+                        id,
+                        remaining: cached.data.remaining,
+                        usage_limit: cached.data.usage_limit,
+                        usage_percentage: cached.data.usage_percentage,
+                        subscription_title: cached.data.subscription_title.clone(),
+                        cached_at: info.cached_at,
+                        ttl_secs: info.ttl_secs,
+                    }
+                } else {
+                    CachedBalanceItem {
+                        id,
+                        remaining: info.remaining,
+                        usage_limit: 0.0,
+                        usage_percentage: 0.0,
+                        subscription_title: None,
+                        cached_at: info.cached_at,
+                        ttl_secs: info.ttl_secs,
+                    }
+                }
             })
             .collect();
 

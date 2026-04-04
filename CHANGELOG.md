@@ -3,6 +3,7 @@
 ## [v1.1.18] - 2026-04-04
 
 ### 修复
+- **Admin UI 余额与订阅展示恢复** — 启动时将磁盘余额缓存回灌到运行时缓存；缓存余额接口扩展返回 `usageLimit`/`usagePercentage`/`subscriptionTitle`，使页面刷新后卡片仍能以完整格式（`余额：41.05 / 50.00 (82.1% 剩余)`）展示，而非仅显示金额；订阅等级改为三级回退：实时余额 → 缓存余额 → 凭据快照 (`src/admin/service.rs`, `src/admin/types.rs`, `src/kiro/token_manager.rs`, `admin-ui/`)
 - **失效凭据立即禁用与订阅等级回写** — `invalid_grant` 的 IdC refresh 失败现在会立即禁用凭据，`TEMPORARILY_SUSPENDED` 的额度查询失败也会立即禁用凭据；同时 `get_usage_limits_for()` 成功后会回写并持久化 `subscription_title`，避免 Free 账号在订阅信息未刷新时误放行 Opus (`src/kiro/token_manager.rs`)
 
 ## [v1.1.17] - 2026-04-04

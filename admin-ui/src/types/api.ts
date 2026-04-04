@@ -19,6 +19,7 @@ export interface CredentialStatusItem {
   accountEmail: string | null
   email?: string
   refreshTokenHash?: string
+  subscriptionTitle?: string | null
 
   // ===== 统计（可持久化） =====
   callsTotal: number
@@ -57,6 +58,9 @@ export interface BalanceResponse {
 export interface CachedBalanceInfo {
   id: number
   remaining: number
+  usageLimit: number
+  usagePercentage: number
+  subscriptionTitle: string | null
   cachedAt: number // Unix 毫秒时间戳
   ttlSecs: number
 }

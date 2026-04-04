@@ -42,6 +42,8 @@ pub struct CredentialStatusItem {
     pub refresh_token_hash: Option<String>,
     /// 用户邮箱（用于前端显示）
     pub email: Option<String>,
+    /// 已持久化的订阅等级（页面刷新后可直接展示）
+    pub subscription_title: Option<String>,
     /// API 调用成功次数
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
@@ -172,6 +174,12 @@ pub struct CachedBalanceItem {
     pub id: u64,
     /// 缓存的剩余额度
     pub remaining: f64,
+    /// 使用限额
+    pub usage_limit: f64,
+    /// 使用百分比
+    pub usage_percentage: f64,
+    /// 订阅类型
+    pub subscription_title: Option<String>,
     /// 缓存时间（Unix 毫秒时间戳）
     pub cached_at: u64,
     /// 缓存存活时间（秒），缓存过期时间 = cached_at + ttl_secs * 1000
